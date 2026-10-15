@@ -117,6 +117,16 @@ The Independent Verifier holds **only** the pinned public key. It re-derives
 Referee cannot substitute a manifest unless it also breaks Ed25519. See
 [`EVIDENCE.md`](EVIDENCE.md) for the recomputation the verifier performs.
 
+## Turn gating protects the single-use capability
+
+The Referee owns the turn counter; the client may not invent a turn that does
+not exist. A turn body carrying anything other than `turn: 1` is refused with
+`ERR_TURN_MISMATCH` (**HTTP 400**) *before* the capability gate is evaluated, so
+a malformed frame can never burn a legitimate single-use nonce. The same check
+runs on both ingress paths — HTTP (`control_plane.rs`) and VSOCK
+(`vsock_server.rs`) — because Red speaks VSOCK in production. See
+[`../README.md`](../README.md) for the full flow.
+
 ## Tests that keep the boundary honest
 
 Integration tests do not mock the signer — they spawn the **real** daemon on
