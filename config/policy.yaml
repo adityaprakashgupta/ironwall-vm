@@ -1,0 +1,30 @@
+# Bayora Enclave — Declarative Policy Engine
+# This file is loaded by the Referee (Policy Enforcement Point) at startup.
+# Its sha256 digest is recorded in every Evaluation Manifest.
+
+policy_version: "2026.10.v3"
+evaluation:
+  timing_mode: "EVAL_500"          # Options: NORMAL | EVAL_500 | EVAL_1000
+  response_frame_bytes: 4096       # Constant egress packet size
+  max_prompt_bytes: 8192           # Strict ingress frame ceiling
+  max_tokens: 64                   # Bounded generation length
+  # abort_margin_ms: 15            # (default) deadline cutoff margin before T_bucket
+
+network:
+  red_to_blue: "MEDIATED"
+  red_to_llm: "MEDIATED"
+  blue_to_red: "DENIED"            # Zero feedback channel from Blue to Red
+
+state:
+  reset_policy: "SNAPSHOT"         # Options: SNAPSHOT (Strict) | LOGICAL_KV (Performance)
+  cache_prompt: false
+
+resources:
+  red:  { cpu_cores: "1",   memory_mb: 512,  pids_max: 64 }
+  blue: { cpu_cores: "2",   memory_mb: 1024, pids_max: 64 }
+  llm:  { cpu_cores: "3,4", memory_mb: 2048, pids_max: 64 }
+
+audit:
+  require_manifest_signature: true
+  dual_write_append_log: true
+  # batch_size: 8                  # (default) evaluations per Merkle batch seal

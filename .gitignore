@@ -1,0 +1,21 @@
+/target/
+/fuzz/target/
+/fuzz/Cargo.lock
+Cargo.lock.bak
+
+# Runtime artifacts — never commit evidence, keys, or snapshots.
+evidence/*.ndjson
+evidence/*.ndjson.*
+keys/*.sk
+keys/*.pk
+microvm/snapshots/
+microvm/images/
+microvm/artifacts/
+*.snap
+*.ext4
+firecracker-bin/
+node_modules/
+
+# Python (guest agents, demos, dashboard)
+__pycache__/
+*.pyc

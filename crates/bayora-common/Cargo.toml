@@ -1,0 +1,24 @@
+[package]
+name = "bayora-common"
+description = "Shared JCS canonicalizer, manifest, event, policy and evidence types for the Bayora Enclave"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Exposes `testutil` to dependents' test builds (referee/verifier integration
+# tests). Never enabled for release artifacts.
+testing = []
+
+[dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

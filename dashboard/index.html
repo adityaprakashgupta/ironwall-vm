@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bayora Enclave - posture</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #131a22;
+    --line: #223040;
+    --text: #d7e2ee;
+    --dim: #7d8fa3;
+    --ok: #43d39e;
+    --warn: #f0b429;
+    --bad: #ef5f5f;
+    --accent: #5aa9f0;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: 0.02em; }
+  .sub { color: var(--dim); font-size: 13px; }
+  .pill {
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 10px; font-size: 12px; font-family: var(--mono);
+  }
+  .pill.ok { color: var(--ok); border-color: #1d4d3d; }
+  .pill.bad { color: var(--bad); border-color: #4d2323; }
+  .grid {
+    display: grid; gap: 16px; margin-top: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px;
+  }
+  section h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--dim); margin: 0 0 12px;
+  }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+  dt { color: var(--dim); }
+  dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; }
+  .num { text-align: right; }
+  .zero { color: var(--dim); }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  input, button {
+    background: #0e141b; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 10px; font: inherit;
+  }
+  input { flex: 1; font-family: var(--mono); }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  pre {
+    margin: 12px 0 0; padding: 10px; background: #0e141b;
+    border: 1px solid var(--line); border-radius: 6px;
+    font-family: var(--mono); font-size: 12px; overflow-x: auto;
+    white-space: pre-wrap; word-break: break-all; max-height: 260px;
+  }
+  footer { color: var(--dim); font-size: 12px; margin-top: 24px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bayora Enclave</h1>
+  <span class="sub">control-plane posture</span>
+  <span id="link" class="pill">connecting...</span>
+  <span class="sub" id="updated"></span>
+</header>
+
+<div class="grid">
+  <section>
+    <h2>Enclave</h2>
+    <dl id="enclave"></dl>
+  </section>
+
+  <section>
+    <h2>Evidence</h2>
+    <dl id="evidence"></dl>
+  </section>
+
+  <section>
+    <h2>Metrics</h2>
+    <table>
+      <thead><tr><th>counter</th><th class="num">value</th></tr></thead>
+      <tbody id="metrics"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Bounded release, per mode</h2>
+    <table>
+      <thead>
+        <tr><th>mode</th><th class="num">n</th><th class="num">mean us</th>
+            <th class="num">stddev</th><th class="num">accuracy</th></tr>
+      </thead>
+      <tbody id="modes"><tr><td colspan="5" class="zero">no samples yet</td></tr></tbody>
+    </table>
+    <form id="lookup">
+      <input id="evalid" placeholder="eval_... (after its turn has run)" autocomplete="off">
+      <button type="submit">inspect</button>
+    </form>
+    <pre id="detail" hidden></pre>
+  </section>
+</div>
+
+<footer>
+  Read-only view. The dashboard proxy forwards <code>GET /healthz</code>,
+  <code>GET /v1/posture</code> and <code>GET /v1/evaluations/{id}</code> and
+  refuses everything else, so this page can never spend a capability.
+</footer>
+
+<script>
+const COUNTERS = [
+  "evaluations_completed", "resets", "capability_replays",
+  "cross_eval_mismatches", "frame_rejections", "deadline_aborts",
+];
+
+function dd(node, entries) {
+  node.innerHTML = entries.map(([k, v]) =>
+    `<dt>${k}</dt><dd>${v}</dd>`).join("");
+}
+
+function counterRow(name, value) {
+  const cls = value > 0 && name !== "evaluations_completed" && name !== "resets"
+    ? "num" : "num zero";
+  return `<tr><td>${name}</td><td class="${cls}">${value}</td></tr>`;
+}
+
+function modeRows(modes) {
+  const names = Object.keys(modes || {});
+  if (!names.length) return '<tr><td colspan="5" class="zero">no samples yet</td></tr>';
+  return names.map(name => {
+    const m = modes[name];
+    const accuracy = m.samples >= 9 ? m.inference_accuracy.toFixed(2) : "n/a";
+    return `<tr><td>${name}</td><td class="num">${m.samples}</td>` +
+      `<td class="num">${m.mean_us.toFixed(0)}</td>` +
+      `<td class="num">${m.stddev_us.toFixed(0)}</td>` +
+      `<td class="num">${accuracy}</td></tr>`;
+  }).join("");
+}
+
+async function refresh() {
+  const link = document.getElementById("link");
+  try {
+    const reply = await fetch("/api/v1/posture", { cache: "no-store" });
+    if (!reply.ok) throw new Error("posture -> HTTP " + reply.status);
+    const p = await reply.json();
+
+    link.className = "pill ok";
+    link.textContent = "live";
+    document.getElementById("updated").textContent =
+      "updated " + new Date().toLocaleTimeString();
+
+    dd(document.getElementById("enclave"), [
+      ["policy", p.policy_version],
+      ["timing", p.timing.mode +
+        (p.timing.bucket_ms ? ` (${p.timing.bucket_ms} ms bucket)` : "")],
+      ["abort margin", p.timing.abort_margin_ms + " ms"],
+      ["transport", p.transport],
+      ["reset", p.reset_policy + " - " + p.reset],
+      ["frame bytes", p.timing.response_frame_bytes],
+    ]);
+
+    const e = p.evidence;
+    dd(document.getElementById("evidence"), [
+      ["chain length", e.chain_len],
+      ["chain head", e.chain_head.slice(0, 32) + "..."],
+      ["pending batch", e.pending_batch + " / " + e.batch_size],
+      ["sinks", e.sinks.join(", ")],
+      ["trust anchor", e.trust_anchor_public_key.slice(0, 32) + "..."],
+    ]);
+
+    document.getElementById("metrics").innerHTML =
+      COUNTERS.map(name => counterRow(name, p.metrics[name])).join("");
+    document.getElementById("modes").innerHTML = modeRows(p.metrics.modes);
+  } catch (err) {
+    link.className = "pill bad";
+    link.textContent = "unreachable";
+    document.getElementById("updated").textContent = String(err);
+  }
+}
+
+document.getElementById("lookup").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const id = document.getElementById("evalid").value.trim();
+  const out = document.getElementById("detail");
+  if (!id) { out.hidden = true; return; }
+  out.hidden = false;
+  out.textContent = "loading...";
+  try {
+    const reply = await fetch("/api/v1/evaluations/" + encodeURIComponent(id),
+                              { cache: "no-store" });
+    out.textContent = JSON.stringify(await reply.json(), null, 2);
+  } catch (err) {
+    out.textContent = String(err);
+  }
+});
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

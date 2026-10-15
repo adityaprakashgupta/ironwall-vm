@@ -1,0 +1,38 @@
+[package]
+name = "bayora-verifier"
+description = "Standalone Independent Verifier — recomputes every JCS hash, chain link, Merkle root and signature without trusting the Referee"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "bayora_verifier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bayora-verifier"
+path = "src/main.rs"
+
+[dependencies]
+bayora-common.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+tokio-postgres = { version = "0.7", optional = true }
+# Only needed to drive the optional PostgreSQL swallow/compare path.
+tokio = { version = "1", features = ["rt"], optional = true }
+
+[dev-dependencies]
+bayora-common = { workspace = true, features = ["testing"] }
+ed25519-dalek.workspace = true
+hex.workspace = true
+tempfile = "3"
+
+[features]
+default = []
+postgres = ["dep:tokio-postgres", "dep:tokio"]

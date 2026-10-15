@@ -1,0 +1,9 @@
+{
+  "kernel_digest": "sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+  "red_image_digest": "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0",
+  "blue_image_digest": "sha256:d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0a1b2c3",
+  "llm_image_digest": "sha256:789abcdef0123456789abcdef0a1b2c3d4e5f60718293a4b5c6d7e8f90123456",
+  "model_digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "blue_policy_digest": "sha256:4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+  "firecracker_version": "v1.7.0"
+}

@@ -1,0 +1,18 @@
+# Line endings are a property of the repository, not of whoever cloned it.
+#
+# This tree has shell scripts (`microvm/*.sh`, run as PID 1 and under `sudo`),
+# a Python demo, Rust sources and a PowerShell script. A CRLF checkout of a
+# shell script fails on Linux with `bad interpreter: ...\r`, which is exactly
+# the kind of deploy-time surprise that an "it built on my machine" repo
+# produces. Normalising to LF on checkout removes the question.
+
+* text=auto eol=lf
+
+# Anything the build treats as opaque bytes stays opaque.
+*.ext4   binary
+*.snap   binary
+*.gguf   binary
+*.vmlinux binary
+*.png    binary
+*.jpg    binary
+*.ico    binary

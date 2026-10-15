@@ -1,0 +1,33 @@
+[package]
+name = "bayora-signer"
+description = "Isolated Trust Anchor signer micro-daemon — the only process holding private key material"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "bayora_signer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bayora-signer"
+path = "src/main.rs"
+
+[dependencies]
+bayora-common.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

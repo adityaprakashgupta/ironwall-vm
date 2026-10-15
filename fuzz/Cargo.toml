@@ -1,0 +1,24 @@
+[package]
+name = "bayora-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bayora-common = { path = "../crates/bayora-common" }
+serde_json = "1"
+
+# Detached from the parent workspace: `cargo fuzz` drives its own (nightly)
+# build, and the workspace must stay buildable on stable with no fuzz deps.
+[workspace]
+
+[[bin]]
+name = "vsock_frame_parser"
+path = "fuzz_targets/vsock_frame_parser.rs"
+test = false
+doc = false
+bench = false

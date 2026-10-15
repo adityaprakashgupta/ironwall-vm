@@ -1,0 +1,53 @@
+[package]
+name = "bayora-referee"
+description = "Blind Referee — the execution TCB (policy, capability, bounded timing, evidence) of the Bayora Enclave"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+default-run = "bayora-referee"
+
+[lib]
+name = "bayora_referee"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bayora-referee"
+path = "src/main.rs"
+
+[dependencies]
+bayora-common.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+# PostgreSQL dual-sink (fast query path). Off by default so the workspace
+# builds without a database; enable with `--features postgres`.
+tokio-postgres = { version = "0.7", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7"
+
+[features]
+default = []
+postgres = ["dep:tokio-postgres"]
+
+[dev-dependencies]
+bayora-common = { workspace = true, features = ["testing"] }
+bayora-signer = { path = "../bayora-signer" }
+bayora-verifier = { path = "../bayora-verifier" }
+ed25519-dalek.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
