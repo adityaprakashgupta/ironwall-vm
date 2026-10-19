@@ -70,7 +70,14 @@ def load_task(path: str) -> dict:
 def run_turn(
     host_cid: int, vsock_port: int, eval_id: str, capability, prompt: str, turn: int
 ) -> dict:
-    """Send one prompt frame and read the constant-size reply."""
+    """Send one prompt frame and read the constant-size reply.
+
+    Connects are retried boundedly: the Referee's AF_UNIX listener may not be
+    up the instant Red boots (boot race), and Red's one-shot connect must not
+    fail the whole evaluation on a transient. Every attempt after a successful
+    connect is a fresh socket; send/read errors are not retried past the
+    deadline because they indicate a real fault, not a boot race.
+    """
     frame = {
         "frame_type": "prompt",
         "eval_id": eval_id,
@@ -78,17 +85,27 @@ def run_turn(
         "turn": turn,
         "prompt": prompt,
     }
-    with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM) as sock:
-        sock.connect((host_cid, vsock_port))
-        wire.send_message(sock, frame)
-        started = time.monotonic()
-        reply = wire.read_padded_response(sock)
-        held_us = int((time.monotonic() - started) * 1_000_000)
-    reply["observed_held_us"] = held_us
-    # Red is the witness to the constant-size egress property: it reads the
-    # same number of bytes whatever the verdict was.
-    reply["observed_frame_bytes"] = wire.RESPONSE_FRAME_BYTES
-    return reply
+    retries = 30          # ~6 s of connect retries before giving up
+    delay = 0.2
+    last_exc: Exception | None = None
+    for _ in range(retries):
+        try:
+            with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM) as sock:
+                sock.settimeout(30.0)
+                sock.connect((host_cid, vsock_port))
+                started = time.monotonic()
+                wire.send_message(sock, frame)
+                reply = wire.read_padded_response(sock)
+                held_us = int((time.monotonic() - started) * 1_000_000)
+            reply["observed_held_us"] = held_us
+            # Red is the witness to the constant-size egress property: it reads
+            # the same number of bytes whatever the verdict was.
+            reply["observed_frame_bytes"] = wire.RESPONSE_FRAME_BYTES
+            return reply
+        except (OSError, wire.FrameError) as exc:
+            last_exc = exc
+            time.sleep(delay)
+    return {"status": "transport_error", "data": str(last_exc)}
 
 
 def main(argv=None) -> int:

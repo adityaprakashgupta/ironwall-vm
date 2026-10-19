@@ -64,6 +64,8 @@ pub use transport::{
 };
 #[cfg(target_os = "linux")]
 pub use transport::VsockTransport;
+#[cfg(unix)]
+pub use transport::FirecrackerUdsTransport;
 pub use trust_anchor::{
     CapabilityIssuer, IsolatedSocketSigner, SignerEndpoint, SignerError, TrustAnchorSigner,
 };

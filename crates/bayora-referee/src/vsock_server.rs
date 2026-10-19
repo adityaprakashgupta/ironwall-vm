@@ -4,6 +4,15 @@
 //! `max_prompt_bytes` enforced *before* the body is read, and a reply of
 //! exactly `response_frame_bytes` padded with ASCII spaces.
 //!
+//! Two host-side transports reach this module, and the frame protocol is
+//! identical over both:
+//!
+//! * native `AF_VSOCK` ([`serve`]) — works for CID-loopback peers on any host
+//!   with vsock support, which is how the loopback demo runs;
+//! * Firecracker's AF_UNIX mediation ([`bind_uds`]/[`serve_uds`]) — the only
+//!   option for guests inside real Firecracker MicroVMs, because Firecracker
+//!   bypasses `vhost-vsock` and native `AF_VSOCK` cannot see them.
+//!
 //! This module is Linux-only by nature: `AF_VSOCK` does not exist on Windows,
 //! so the Windows build compiles the control-plane API only and the VSOCK
 //! server is exercised in WSL / on the demo host.
@@ -12,7 +21,7 @@ use crate::referee::{RefereeError, RefereeState, TurnOutcome};
 use bayora_common::frame::{parse_body, pad_response, ResponseEnvelope};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_vsock::{VsockAddr, VsockListener, VsockStream};
+use tokio_vsock::{VsockAddr, VsockListener};
 
 /// `VMADDR_CID_ANY` — bind on every CID (the host side of the enclave).
 const VMADDR_CID_ANY: u32 = u32::MAX;
@@ -54,7 +63,94 @@ pub async fn serve(state: Arc<RefereeState>, port: u32) -> anyhow::Result<()> {
     }
 }
 
-async fn handle_connection(state: Arc<RefereeState>, mut stream: VsockStream) -> anyhow::Result<()> {
+/// Bind the Red ingress listener for Firecracker's AF_UNIX vsock mediation.
+///
+/// When the Red MicroVM connects to CID 2 inside a Firecracker guest, the
+/// vsock device forwards that connection to a host-side Unix socket named
+/// `<uds_path>_<port>` (Firecracker's docs/vsock.md): the host *listens* and
+/// Firecracker dials *it* — the mirror image of the host-initiated
+/// `CONNECT <port>` handshake the outbound transport performs. There is no
+/// handshake on this direction; the accepted stream speaks the frame protocol
+/// immediately.
+///
+/// Binding must happen before the Red VM boots (Red connects once, with its
+/// one-shot task), which is why the Referee starts first and
+/// `boot_enclave.sh` waits for this socket file to exist. Binding is done
+/// eagerly and returned to the caller so a failure aborts Referee startup
+/// instead of leaving an enclave up with no ingress.
+///
+/// A Unix socket file outlives its process: after a crash or restart, bind
+/// fails with `EADDRINUSE` even though nothing is listening. The stale file
+/// is only removed after proving no live peer answers — a second Referee can
+/// never silently steal the guest's connections.
+#[cfg(unix)]
+pub async fn bind_uds(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+    use tokio::net::UnixListener;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    match UnixListener::bind(path) {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            let probe = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                tokio::net::UnixStream::connect(path),
+            )
+            .await;
+            let stale = match probe {
+                // A refused probe proves the file is a leftover: nothing
+                // accepts there any more.
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => true,
+                // A live peer — or any outcome we cannot disprove — is not
+                // ours to evict.
+                Ok(_) | Err(_) => false,
+            };
+            if !stale {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("another Referee already listens on {}", path.display()),
+                ));
+            }
+            std::fs::remove_file(path)?;
+            UnixListener::bind(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Serve the Red MicroVM's frame protocol over an AF_UNIX listener obtained
+/// from [`bind_uds`], until the process exits.
+#[cfg(unix)]
+pub async fn serve_uds(
+    state: Arc<RefereeState>,
+    port: u32,
+    path: &std::path::Path,
+    listener: tokio::net::UnixListener,
+) {
+    tracing::info!(port, path = %path.display(), "vsock referee listening (AF_UNIX, firecracker-mediated)");
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _addr)) => stream,
+            Err(e) => {
+                tracing::warn!(error = %e, "uds accept failed");
+                continue;
+            }
+        };
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(state, stream).await {
+                tracing::debug!(error = %e, "uds connection closed");
+            }
+        });
+    }
+}
+
+async fn handle_connection<S>(state: Arc<RefereeState>, mut stream: S) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let max_body = state.policy().max_prompt_bytes();
 
     // Length prefix first: an oversized declaration is refused before any
@@ -104,12 +200,15 @@ async fn handle_connection(state: Arc<RefereeState>, mut stream: VsockStream) ->
 
 /// Reply with a canonical error code, padded to the constant frame size so the
 /// wire never varies — rejections must be as constant as acceptances.
-async fn write_rejected(
+async fn write_rejected<S>(
     state: &RefereeState,
-    stream: &mut VsockStream,
+    stream: &mut S,
     code: &str,
     message: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let envelope = ResponseEnvelope::rejected(code, message);
     let (frame, _truncated) = pad_response(&envelope, state.policy().response_frame_bytes())?;
     stream.write_all(&frame).await?;
@@ -120,11 +219,14 @@ async fn write_rejected(
 /// A frame-level rejection (before a capability or evaluation exists): reply
 /// with the canonical error code, still padded to the constant frame size so
 /// the wire never varies.
-async fn write_error(
+async fn write_error<S>(
     state: &RefereeState,
-    stream: &mut VsockStream,
+    stream: &mut S,
     err: bayora_common::frame::FrameError,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     let code = match err {
         bayora_common::frame::FrameError::TooLarge { .. }
         | bayora_common::frame::FrameError::BadLengthPrefix { .. } => {

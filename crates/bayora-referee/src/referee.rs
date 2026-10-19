@@ -179,6 +179,16 @@ pub struct RefereeState {
     metrics: Arc<Metrics>,
     open: Mutex<HashMap<String, OpenEvaluation>>,
     finalized: Mutex<HashMap<String, FinalizedEvaluation>>,
+    /// Evaluations execute one at a time, reset through release.
+    ///
+    /// The capability gate and the evidence chain are safe under concurrent
+    /// turns, but the *workloads are not*: a second evaluation's reset while
+    /// the first is still routing would swap the LLM MicroVM's memory
+    /// mid-turn — exactly the cross-evaluation bleed the Resettable pillar
+    /// exists to forbid. Held from just before the reset until the bounded
+    /// execution finishes, so each turn's measured duration never includes
+    /// waiting for another turn.
+    turn_lock: Mutex<()>,
     capability_ttl_ms: u64,
 }
 
@@ -207,6 +217,7 @@ impl RefereeState {
             metrics,
             open: Mutex::new(HashMap::new()),
             finalized: Mutex::new(HashMap::new()),
+            turn_lock: Mutex::new(()),
             capability_ttl_ms,
         }
     }
@@ -339,6 +350,13 @@ impl RefereeState {
         drop(open);
 
         // 3. Reset to a clean state before any prompt-derived work runs.
+        //    The lock serialises reset-through-release across evaluations:
+        //    the workloads are single-tenant, so a concurrent evaluation's
+        //    reset would swap the LLM MicroVM's memory out from under a turn
+        //    in flight. Taken after the capability gate, released before
+        //    evidence emission — no turn's measured duration ever includes
+        //    waiting for another turn.
+        let turn = self.turn_lock.lock().await;
         let reset_report = match self.reset.reset().await {
             Ok(report) => {
                 self.metrics.record_reset();
@@ -385,6 +403,9 @@ impl RefereeState {
                 (PathLabel::Llm, ResponseEnvelope::timeout(), true)
             }
         };
+        // The workloads are free for the next evaluation from here on: the
+        // response frame is already computed and evidence is host-side only.
+        drop(turn);
 
         // 5. Evidence: reset -> route -> (abort) -> release.
         eval.events.push(EvaluationEvent::PromptRouted {
@@ -422,7 +443,6 @@ impl RefereeState {
         if let Err(e) = self.evidence.maybe_seal().await {
             tracing::warn!(error = %e, "auto-seal failed; batch remains pending");
         }
-
         // 6. Telemetry + retention for the HUD.
         self.metrics.record_turn(self.policy.timing_mode(), held_us, path);
         self.metrics.record_evaluation_completed();
@@ -438,7 +458,7 @@ impl RefereeState {
                 events: eval.events.clone(),
                 seq,
                 chain_hash,
-                status: if aborted { "timeout" } else { "ok" }.into(),
+                status: (if aborted { "timeout" } else { "ok" }).into(),
                 path,
             },
         );

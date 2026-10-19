@@ -8,6 +8,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -167,6 +169,58 @@ impl WorkloadTransport for StubTransport {
     }
 }
 
+/// One length-prefixed JSON request/response exchange over an already
+/// established stream: `u32 LE length || JSON` out, the same framing back.
+///
+/// Shared by every real stream transport (native VSOCK and Firecracker's
+/// AF_UNIX mediation), so the guest wire format has exactly one
+/// implementation no matter how the host end of the socket was reached.
+#[cfg(unix)]
+async fn framed_call<S, TReq, TResp>(
+    stream: &mut S,
+    endpoint: &str,
+    request: &TReq,
+) -> Result<TResp, TransportError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    TReq: Serialize,
+    TResp: for<'de> Deserialize<'de>,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = serde_json::to_vec(request).map_err(|e| TransportError::Malformed(e.to_string()))?;
+    stream
+        .write_all(&(body.len() as u32).to_le_bytes())
+        .await
+        .map_err(|e| TransportError::Io(format!("{endpoint} write: {e}")))?;
+    stream
+        .write_all(&body)
+        .await
+        .map_err(|e| TransportError::Io(format!("{endpoint} write: {e}")))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| TransportError::Io(format!("{endpoint} flush: {e}")))?;
+
+    let mut prefix = [0u8; 4];
+    stream
+        .read_exact(&mut prefix)
+        .await
+        .map_err(|e| TransportError::Io(format!("{endpoint} read: {e}")))?;
+    let len = u32::from_le_bytes(prefix) as usize;
+    if len == 0 || len > 1024 * 1024 {
+        return Err(TransportError::Malformed(format!(
+            "{endpoint} declared {len} response bytes"
+        )));
+    }
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| TransportError::Io(format!("{endpoint} read: {e}")))?;
+    serde_json::from_slice(&buf).map_err(|e| TransportError::Malformed(e.to_string()))
+}
+
 /// Real MicroVM transport over VSOCK.
 ///
 /// The Referee is the only component with a VSOCK path to the untrusted
@@ -189,7 +243,6 @@ impl VsockTransport {
         TReq: Serialize,
         TResp: for<'de> Deserialize<'de>,
     {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio_vsock::{VsockAddr, VsockStream};
 
         let endpoint = format!("vsock:{cid}:{port}");
@@ -197,38 +250,7 @@ impl VsockTransport {
             let mut stream = VsockStream::connect(VsockAddr::new(cid, port))
                 .await
                 .map_err(|e| TransportError::Io(format!("{endpoint}: {e}")))?;
-            let body = serde_json::to_vec(request)
-                .map_err(|e| TransportError::Malformed(e.to_string()))?;
-            stream
-                .write_all(&(body.len() as u32).to_le_bytes())
-                .await
-                .map_err(|e| TransportError::Io(format!("{endpoint} write: {e}")))?;
-            stream
-                .write_all(&body)
-                .await
-                .map_err(|e| TransportError::Io(format!("{endpoint} write: {e}")))?;
-            stream
-                .flush()
-                .await
-                .map_err(|e| TransportError::Io(format!("{endpoint} flush: {e}")))?;
-
-            let mut prefix = [0u8; 4];
-            stream
-                .read_exact(&mut prefix)
-                .await
-                .map_err(|e| TransportError::Io(format!("{endpoint} read: {e}")))?;
-            let len = u32::from_le_bytes(prefix) as usize;
-            if len == 0 || len > 1024 * 1024 {
-                return Err(TransportError::Malformed(format!(
-                    "{endpoint} declared {len} response bytes"
-                )));
-            }
-            let mut buf = vec![0u8; len];
-            stream
-                .read_exact(&mut buf)
-                .await
-                .map_err(|e| TransportError::Io(format!("{endpoint} read: {e}")))?;
-            serde_json::from_slice(&buf).map_err(|e| TransportError::Malformed(e.to_string()))
+            framed_call(&mut stream, &endpoint, request).await
         };
 
         tokio::time::timeout(self.timeout, fut)
@@ -255,6 +277,116 @@ impl WorkloadTransport for VsockTransport {
         format!(
             "vsock (blue {}:{} / llm {}:{})",
             self.blue_cid, self.blue_port, self.llm_cid, self.llm_port
+        )
+    }
+}
+
+/// Real MicroVM transport for Firecracker's AF_UNIX vsock mediation.
+///
+/// Firecracker bypasses `vhost-vsock`, so the host end of every guest vsock
+/// is a plain Unix socket beside the Firecracker process — native `AF_VSOCK`
+/// cannot reach the guests at all. The protocol on top is Firecracker's own
+/// (docs/vsock.md):
+///
+/// * host → guest: connect `uds_path`, send `CONNECT <port>\n`, the device
+///   answers `OK <port>\n`, and from then on the stream *is* the guest
+///   socket — the same `u32 LE length || JSON` frames as everywhere else;
+/// * guest → host: the host listens at `<uds_path>_<port>` and Firecracker
+///   dials *it* when the guest connects to CID 2
+///   (see `vsock_server::serve_uds`).
+#[cfg(unix)]
+pub struct FirecrackerUdsTransport {
+    pub blue_uds: PathBuf,
+    pub blue_port: u32,
+    pub llm_uds: PathBuf,
+    pub llm_port: u32,
+    pub timeout: Duration,
+}
+
+#[cfg(unix)]
+impl FirecrackerUdsTransport {
+    async fn call<TReq, TResp>(
+        &self,
+        uds: &Path,
+        port: u32,
+        request: &TReq,
+    ) -> Result<TResp, TransportError>
+    where
+        TReq: Serialize,
+        TResp: for<'de> Deserialize<'de>,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let endpoint = format!("fc-vsock:{}:{port}", uds.display());
+        let fut = async {
+            let mut stream = tokio::net::UnixStream::connect(uds)
+                .await
+                .map_err(|e| TransportError::Io(format!("{endpoint}: {e}")))?;
+
+            // Firecracker's handshake: ask for the guest port and require the
+            // exact ack. The device terminates the connection instead of
+            // answering when the guest has nothing listening there, so a
+            // refused call surfaces here rather than as a silent hang.
+            stream
+                .write_all(format!("CONNECT {port}\n").as_bytes())
+                .await
+                .map_err(|e| TransportError::Io(format!("{endpoint} handshake write: {e}")))?;
+            let mut line = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                stream
+                    .read_exact(&mut byte)
+                    .await
+                    .map_err(|e| TransportError::Io(format!("{endpoint} handshake read: {e}")))?;
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+                if line.len() > 32 {
+                    return Err(TransportError::Malformed(format!(
+                        "{endpoint}: oversized handshake line"
+                    )));
+                }
+            }
+            let ack = std::str::from_utf8(&line).map_err(|_| {
+                TransportError::Malformed(format!("{endpoint}: non-UTF-8 handshake"))
+            })?;
+            if !ack.starts_with("OK ") {
+                return Err(TransportError::Malformed(format!(
+                    "{endpoint}: handshake answered {ack:?}"
+                )));
+            }
+
+            framed_call(&mut stream, &endpoint, request).await
+        };
+
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .map_err(|_| TransportError::Timeout {
+                endpoint,
+                timeout_ms: self.timeout.as_millis() as u64,
+            })?
+    }
+}
+
+#[cfg(unix)]
+#[async_trait]
+impl WorkloadTransport for FirecrackerUdsTransport {
+    async fn ask_blue(&self, request: &BlueRequest) -> Result<BlueVerdict, TransportError> {
+        self.call(&self.blue_uds, self.blue_port, request).await
+    }
+
+    async fn ask_llm(&self, request: &LlmRequest) -> Result<LlmResponse, TransportError> {
+        self.call(&self.llm_uds, self.llm_port, request).await
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "firecracker vsock (uds blue {}:{}/ llm {}:{})",
+            self.blue_uds.display(),
+            self.blue_port,
+            self.llm_uds.display(),
+            self.llm_port
         )
     }
 }
@@ -329,5 +461,68 @@ mod tests {
     #[test]
     fn describe_is_human_readable() {
         assert!(StubTransport::default().describe().contains("stub"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firecracker_transport_describes_the_uds_endpoints() {
+        let transport = FirecrackerUdsTransport {
+            blue_uds: std::path::PathBuf::from("/run/bayora/blue.vsock"),
+            blue_port: 9001,
+            llm_uds: std::path::PathBuf::from("/run/bayora/llm.vsock"),
+            llm_port: 9002,
+            timeout: Duration::from_secs(1),
+        };
+        let described = transport.describe();
+        assert!(described.contains("vsock"), "{described}");
+        assert!(described.contains("/run/bayora/llm.vsock"), "{described}");
+    }
+
+    /// Firecracker terminates the host connection when the guest port is
+    /// closed, and answers with something other than `OK <port>` when the
+    /// device refuses. Either way the transport must fail loudly instead of
+    /// speaking frames into a connection that is not the guest's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn firecracker_transport_rejects_a_bad_handshake() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("bayora-handshake-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let uds = dir.join("probe.vsock");
+        let _ = std::fs::remove_file(&uds);
+        let listener = tokio::net::UnixListener::bind(&uds).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            while byte[0] != b'\n' {
+                stream.read_exact(&mut byte).await.unwrap();
+                line.push(byte[0]);
+            }
+            assert_eq!(String::from_utf8(line).unwrap(), "CONNECT 9002\n");
+            stream.write_all(b"BUSY 9002\n").await.unwrap();
+        });
+
+        let transport = FirecrackerUdsTransport {
+            blue_uds: uds.clone(),
+            blue_port: 9001,
+            llm_uds: uds.clone(),
+            llm_port: 9002,
+            timeout: Duration::from_secs(5),
+        };
+        let err = transport
+            .ask_llm(&LlmRequest {
+                eval_id: "eval_1".into(),
+                prompt: "hi".into(),
+                max_tokens: 8,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TransportError::Malformed(_)), "got {err:?}");
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&uds);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

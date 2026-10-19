@@ -1,9 +1,9 @@
 {
-  "kernel_digest": "sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
-  "red_image_digest": "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0",
-  "blue_image_digest": "sha256:d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0a1b2c3",
-  "llm_image_digest": "sha256:789abcdef0123456789abcdef0a1b2c3d4e5f60718293a4b5c6d7e8f90123456",
-  "model_digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-  "blue_policy_digest": "sha256:4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
-  "firecracker_version": "v1.7.0"
+  "kernel_digest": "sha256:89303a7b37665512e4f816df85f32ae26fa046f449116990297a0bbb7bcca13d",
+  "red_image_digest": "sha256:54692244baabfdae157578baca8abf05ae13514bfd3c6a88d0a3fe08b369c17d",
+  "blue_image_digest": "sha256:54d1ef772562fa161a0ec94361e1b9d64771415c54e7de25a4922c5ff05f3a11",
+  "llm_image_digest": "sha256:53cf9082ba3d2079768ba062103882e2d4bda6ea8a1218d0a72f5efe498c4f24",
+  "model_digest": "sha256:74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+  "blue_policy_digest": "sha256:d7410617d2e61b54ca5e3934100ca46188918dfff64be6718bef040eab0075f4",
+  "firecracker_version": "v1.17.0"
 }

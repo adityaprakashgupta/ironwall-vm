@@ -30,7 +30,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MICROVM="$ROOT/microvm"
-IMAGES="$MICROVM/images"
+# Same overrides as build_immutable_images.sh: the images must be booted from
+# wherever they were built, and on WSL that is not /mnt/c.
+IMAGES="${BAYORA_IMAGES_DIR:-$MICROVM/images}"
 RUNTIME="${BAYORA_RUNTIME:-/run/bayora}"
 FIRECRACKER="${FIRECRACKER:-firecracker}"
 
@@ -72,6 +74,18 @@ done
 
 mkdir -p "$RUNTIME"
 PIDS=()
+
+# The llm guest refuses to serve unless the weights on its disk hash to the
+# digest the deployment published. Read that digest out of config/images.json
+# (what build_immutable_images.sh measured) and put it on the kernel command
+# line; booting llm without it would freeze the guest in its fail-closed loop.
+MODEL_SHA=""
+if [ -f "$ROOT/config/images.json" ]; then
+  MODEL_SHA="$(python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1])).get("model_digest", "")
+print(value.removeprefix("sha256:"))' "$ROOT/config/images.json" 2>/dev/null || true)"
+fi
 
 cleanup() {
   echo
@@ -115,23 +129,42 @@ boot() {
     drives="$drives,{\"drive_id\":\"$(basename "$extra" .ext4)\",\"path_on_host\":\"$extra\",\"is_root_device\":false,\"is_read_only\":true}"
   done
 
+  # Only the llm role carries weights, so only it is told which ones to expect.
+  local boot_args="console=ttyS0 reboot=k panic=1 pci=off init=/opt/bayora/init.sh bayora.role=$role bayora.port=$port"
+  if [ "$role" = llm ]; then
+    [ -n "$MODEL_SHA" ] || die "config/images.json has no model_digest; the llm guest refuses to boot unverified weights"
+    boot_args="$boot_args bayora.model_sha256=$MODEL_SHA"
+  fi
+
   cat > "$config" <<JSON
 {
   "boot-source": {
     "kernel_image_path": "$KERNEL",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/opt/bayora/init.sh bayora.role=$role bayora.port=$port"
+    "boot_args": "$boot_args"
   },
   "drives": [$drives],
   "machine-config": { "vcpu_count": $VCPUS, "mem_size_mib": $MEM_MIB, "smt": false },
   "vsock": { "guest_cid": $cid, "uds_path": "$vsock_uds" },
+  "serial": { "path": "$RUNTIME/$role.serial" },
   "logger": { "log_path": "$log", "level": "Warning" }
 }
 JSON
 
-  "$FIRECRACKER" --api-sock "$api_sock" --config-file "$config" >/dev/null 2>&1 &
+  "$FIRECRACKER" --api-sock "$api_sock" --config-file "$config" >"$RUNTIME/$role.fcout" 2>&1 &
   local pid=$!
   PIDS+=("$pid")
   wait_for_socket "$api_sock" "$role"
+  # `--config-file` configures the microVM; start it explicitly so the vsock
+  # device (and the host-side $role.vsock socket) is actually activated.
+  curl -s -f -X PUT "http://localhost/actions" --unix-socket "$api_sock" \
+    -H 'Content-Type: application/json' -d '{"action_type":"InstanceStart"}' >/dev/null 2>&1 || true
+  # Wait for the vsock socket to appear, then make it world-readable so the
+  # Referee (which may run as a different user) can connect to it.
+  for _ in $(seq 1 100); do [ -S "$vsock_uds" ] && break; sleep 0.1; done
+  if [ -S "$vsock_uds" ]; then
+    chmod 0666 "$vsock_uds" 2>/dev/null || true
+  fi
+  echo "$pid" > "$RUNTIME/fc-$role.pid"
   echo "    cid $cid  $role  pid $pid  $IMAGES/$role.ext4"
 }
 
@@ -141,9 +174,9 @@ JSON
 prepare_task_disk() {
   local stage
   stage="$(mktemp -d)"
-  mkdir -p "$stage/run/bayora"
-  cp "$TASK" "$stage/run/bayora/task.json"
-  chmod 0400 "$stage/run/bayora/task.json"
+  mkdir -p "$stage"
+  cp "$TASK" "$stage/task.json"
+  chmod 0400 "$stage/task.json"
   dd if=/dev/zero of="$RUNTIME/red-task.ext4" bs=1M count=4 status=none
   mke2fs -q -t ext4 -F -b 1024 -I 128 -L bayora-task -d "$stage" "$RUNTIME/red-task.ext4"
   rm -rf "$stage"
@@ -153,25 +186,27 @@ echo "==> booting the enclave (no network devices anywhere)"
 boot blue 4 9001
 boot llm  5 9002
 
-if [ -n "$TASK" ]; then
-  [ -f "$TASK" ] || die "task file not found: $TASK"
-  prepare_task_disk
-  boot red 3 9000 "$RUNTIME/red-task.ext4"
-else
-  echo "    (no --task given: red is not booted; provision one evaluation first)"
-fi
-
 echo
-echo "==> waiting for the guests to answer over VSOCK"
+echo "==> waiting for the guests to answer over AF_UNIX vsock mediation"
 python3 - "$RUNTIME" <<'PY'
 import json, os, socket, struct, sys, time
 
 runtime = sys.argv[1]
 
-def call(cid, port, message, timeout=2.0):
-    with socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM) as sock:
+def call(sock_path, port, message, timeout=2.0):
+    # Firecracker mediates the guest vsock over AF_UNIX: connect the host-side
+    # uds socket, ask for the guest port with "CONNECT <port>\n", require the
+    # exact "OK <port>\n" ack, then speak the length-prefixed JSON frame.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
-        sock.connect((cid, port))
+        sock.connect(sock_path)
+        sock.sendall(f"CONNECT {port}\n".encode())
+        ack = sock.makefile("rb").readline()
+        # Firecracker acknowledges with "OK <host-side-assigned-port>", not
+        # "OK <guest-port>"; a guest that is not listening terminates the
+        # connection instead.
+        if not ack.strip().startswith(b"OK "):
+            raise OSError(f"vsock handshake failed: {ack!r}")
         body = json.dumps(message).encode()
         sock.sendall(struct.pack("<I", len(body)) + body)
         (length,) = struct.unpack("<I", sock.recv(4))
@@ -184,12 +219,12 @@ def call(cid, port, message, timeout=2.0):
             remaining -= len(chunk)
         return json.loads(b"".join(chunks).decode())
 
-def wait(cid, port, message, predicate, label, timeout=20.0):
+def wait(sock_path, port, message, predicate, label, timeout=20.0):
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         try:
-            reply = call(cid, port, message)
+            reply = call(sock_path, port, message)
             if predicate(reply):
                 print(f"    [ok] {label}")
                 return reply
@@ -199,11 +234,32 @@ def wait(cid, port, message, predicate, label, timeout=20.0):
         time.sleep(0.2)
     raise SystemExit(f"    [FAILED] {label}: last response was {last!r}")
 
-wait(4, 9001, {"eval_id": "probe", "prompt": "hello"},
+wait(os.path.join(runtime, "blue.vsock"), 9001,
+     {"eval_id": "probe", "prompt": "hello"},
      lambda r: r.get("decision") == "allow", "blue answered a verdict")
-wait(5, 9002, {"eval_id": "probe", "prompt": "hello", "max_tokens": 8},
+wait(os.path.join(runtime, "llm.vsock"), 9002,
+     {"eval_id": "probe", "prompt": "hello", "max_tokens": 8},
      lambda r: "output" in r, "llm answered a completion")
 PY
+
+if [ -n "$TASK" ]; then
+  [ -f "$TASK" ] || die "task file not found: $TASK"
+  # Red dials CID 2:5000 from inside its VM; Firecracker forwards that to the
+  # Referee's AF_UNIX listener at $RUNTIME/red.vsock_5000. The Referee must be
+  # up and listening before Red boots, or Red's one-shot connect fails and
+  # the evaluation cannot run.
+  echo "==> waiting for the Referee's red listener ($RUNTIME/red.vsock_5000)"
+  for _ in $(seq 1 300); do
+    [ -S "$RUNTIME/red.vsock_5000" ] && break
+    sleep 0.1
+  done
+  [ -S "$RUNTIME/red.vsock_5000" ] || \
+    die "Referee is not listening on $RUNTIME/red.vsock_5000: start bayora-referee (--transport firecracker) before booting red"
+  prepare_task_disk
+  boot red 3 9000 "$RUNTIME/red-task.ext4"
+else
+  echo "    (no --task given: red is not booted; provision one evaluation first)"
+fi
 
 cat <<EOF
 
@@ -213,16 +269,24 @@ cat <<EOF
         --policy config/policy.yaml \\
         --images config/images.json \\
         --signer unix:$RUNTIME/signer.sock \\
-        --transport vsock \\
-        --blue-cid 4 --blue-port 9001 \\
-        --llm-cid 5 --llm-port 9002 \\
+        --runtime-dir $RUNTIME \\
+        --firecracker-api $RUNTIME/fc-llm.sock \\
+        --llm-port 9002 \\
+        --transport firecracker \\
         --vsock-port 5000 \\
         --evidence-log evidence/evidence_log.ndjson \\
         --reset snapshot
 
   then drive it with a capability per evaluation, and let Red speak:
 
-    python3 workloads/red-team/agent.py --host-cid 2 --vsock-port 5000
+    python3 workloads/red-team/agent.py --vsock-port 5000
+
+  (--host-cid is irrelevant under --transport firecracker: Firecracker maps
+  the guest's CID 2 to the Referee's AF_UNIX listener at $RUNTIME/red.vsock_5000.)
+
+  The Referee owns the llm Firecracker process: on each reset it kills the
+  pidfile instance, respawns firecracker, loads the golden snapshot and waits
+  for the restored llm to answer the CONNECT handshake before the turn runs.
 
   Ctrl-C here tears the VMs down. Guest logs: $RUNTIME/*.log
 EOF

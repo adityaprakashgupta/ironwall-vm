@@ -51,17 +51,25 @@ struct Args {
     #[arg(long)]
     postgres_url: Option<String>,
 
-    /// Downstream transport: `stub` (demo/tests) or `vsock` (MicroVMs).
+    /// Downstream transport: `stub` (demo/tests), `vsock` (native AF_VSOCK —
+    /// the CID-loopback demo) or `firecracker` (Firecracker's AF_UNIX vsock
+    /// mediation, for guests inside real MicroVMs; Linux only).
     #[arg(long, default_value = "stub")]
     transport: String,
 
-    /// VSOCK endpoint of the Blue-team VM.
+    /// Runtime directory holding the enclave's Firecracker-mediated vsock
+    /// endpoints: `blue.vsock`, `llm.vsock`, `red.vsock_<port>`, plus the
+    /// LLM instance's API socket and pid file.
+    #[arg(long, default_value = "/run/bayora")]
+    runtime_dir: PathBuf,
+
+    /// Native VSOCK endpoint of the Blue-team VM (`--transport vsock`).
     #[arg(long, default_value_t = 4)]
     blue_cid: u32,
     #[arg(long, default_value_t = 9001)]
     blue_port: u32,
 
-    /// VSOCK endpoint of the LLM VM.
+    /// Native VSOCK endpoint of the LLM VM (`--transport vsock`).
     #[arg(long, default_value_t = 5)]
     llm_cid: u32,
     #[arg(long, default_value_t = 9002)]
@@ -71,11 +79,19 @@ struct Args {
     #[arg(long, default_value = "noop")]
     reset: String,
 
-    /// Firecracker API socket (used with `--reset snapshot`).
-    #[arg(long, default_value = "/run/firecracker/llm.sock")]
-    firecracker_api: PathBuf,
+    /// Firecracker API socket (used with `--reset snapshot`; default:
+    /// `<runtime-dir>/fc-llm.sock`).
+    #[arg(long)]
+    firecracker_api: Option<PathBuf>,
 
-    /// Golden snapshot to restore (used with `--reset snapshot`).
+    /// Binary the `snapshot` reset respawns for every evaluation (the restore
+    /// is a fresh process: Firecracker accepts one snapshot load per process).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    #[arg(long, default_value = "firecracker")]
+    firecracker_bin: PathBuf,
+
+    /// Golden snapshot to restore (used with `--reset snapshot`); guest RAM is
+    /// read from the sibling file with the same stem and a `.mem` extension.
     #[arg(long, default_value = "microvm/snapshots/llm-golden.snap")]
     snapshot_path: PathBuf,
 
@@ -91,7 +107,10 @@ struct Args {
     #[arg(long, default_value_t = 4096)]
     max_tracked_nonces: usize,
 
-    /// Also serve the Red MicroVM over VSOCK (Linux only).
+    /// Red MicroVM ingress port (Linux only). With `--transport firecracker`
+    /// this is the host AF_UNIX listener `<runtime-dir>/red.vsock_<port>` that
+    /// Firecracker dials when the guest connects to CID 2; default 5000 in
+    /// that mode.
     #[arg(long)]
     vsock_port: Option<u32>,
 }
@@ -166,6 +185,15 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // 5. Transport + reset manager.
+    let firecracker_api: PathBuf = args
+        .firecracker_api
+        .clone()
+        .unwrap_or_else(|| args.runtime_dir.join("fc-llm.sock"));
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let blue_uds = args.runtime_dir.join("blue.vsock");
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let llm_uds = args.runtime_dir.join("llm.vsock");
+
     let transport: Arc<dyn WorkloadTransport> = match args.transport.as_str() {
         "stub" => Arc::new(StubTransport::default()),
         #[cfg(target_os = "linux")]
@@ -180,14 +208,40 @@ async fn main() -> anyhow::Result<()> {
         "vsock" => {
             anyhow::bail!("--transport vsock requires Linux; run under WSL or use --transport stub")
         }
-        other => anyhow::bail!("unknown --transport {other:?} (expected stub|vsock)"),
+        #[cfg(unix)]
+        "firecracker" => Arc::new(bayora_referee::FirecrackerUdsTransport {
+            blue_uds: blue_uds.clone(),
+            blue_port: args.blue_port,
+            llm_uds: llm_uds.clone(),
+            llm_port: args.llm_port,
+            timeout: std::time::Duration::from_secs(30),
+        }),
+        #[cfg(not(unix))]
+        "firecracker" => {
+            anyhow::bail!("--transport firecracker requires Linux (AF_UNIX vsock mediation)")
+        }
+        other => anyhow::bail!("unknown --transport {other:?} (expected stub|vsock|firecracker)"),
     };
     let reset: Arc<dyn ResetManager> = match args.reset.as_str() {
         "noop" => Arc::new(NoopResetManager::new(policy.reset_policy())),
-        "snapshot" => Arc::new(bayora_referee::FirecrackerSnapshotManager::new(
-            &args.firecracker_api,
-            &args.snapshot_path,
-        )),
+        "snapshot" => {
+            let manager = bayora_referee::FirecrackerSnapshotManager::new(
+                &firecracker_api,
+                &args.snapshot_path,
+            );
+            // A snapshot restore is a fresh Firecracker process — the load is
+            // accepted exactly once per process — so the reset manager owns
+            // the process lifecycle: kill, respawn, load, and (in
+            // firecracker mode, where the guest socket is observable) wait
+            // until the restored workload answers before the turn proceeds.
+            #[cfg(unix)]
+            let manager = manager.with_process(
+                &args.firecracker_bin,
+                &llm_uds,
+                (args.transport == "firecracker").then_some(args.llm_port),
+            );
+            Arc::new(manager)
+        }
         "kv" => Arc::new(LogicalKvResetManager::new(&args.llama_url, 0)),
         other => anyhow::bail!("unknown --reset {other:?} (expected noop|snapshot|kv)"),
     };
@@ -207,18 +261,43 @@ async fn main() -> anyhow::Result<()> {
         args.capability_ttl_ms,
     ));
 
-    // 7. Optional VSOCK listener for the Red MicroVM.
+    // 7. Red MicroVM ingress. `--transport firecracker` defaults to the
+    //    guest default port (5000) because that direction is Firecracker's
+    //    only route into a real guest; native vsock stays opt-in.
     #[cfg(target_os = "linux")]
-    if let Some(port) = args.vsock_port {
-        let vsock_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            if let Err(e) = bayora_referee::vsock_server::serve(vsock_state, port).await {
-                tracing::error!(error = %e, "vsock server exited");
-            }
-        });
+    let red_port: Option<u32> = args
+        .vsock_port
+        .or_else(|| (args.transport == "firecracker").then_some(5000));
+    #[cfg(not(target_os = "linux"))]
+    let red_port: Option<u32> = args.vsock_port;
+
+    #[cfg(target_os = "linux")]
+    if let Some(port) = red_port {
+        let ingress_state = Arc::clone(&state);
+        if args.transport == "firecracker" {
+            // Firecracker forwards guest-initiated connections to the host
+            // Unix socket `<uds_path>_<port>`, and Red dials exactly once
+            // with its one-shot task — so the listener must exist *before*
+            // the Red VM boots. Bind eagerly: an unusable ingress aborts
+            // startup instead of leaving an enclave up with no way in.
+            let path = args.runtime_dir.join(format!("red.vsock_{port}"));
+            let listener = bayora_referee::vsock_server::bind_uds(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("red ingress bind {}: {e}", path.display()))?;
+            tokio::spawn(async move {
+                bayora_referee::vsock_server::serve_uds(ingress_state, port, &path, listener)
+                    .await;
+            });
+        } else {
+            tokio::spawn(async move {
+                if let Err(e) = bayora_referee::vsock_server::serve(ingress_state, port).await {
+                    tracing::error!(error = %e, "vsock server exited");
+                }
+            });
+        }
     }
     #[cfg(not(target_os = "linux"))]
-    if args.vsock_port.is_some() {
+    if red_port.is_some() {
         anyhow::bail!("--vsock-port requires Linux; run under WSL");
     }
 

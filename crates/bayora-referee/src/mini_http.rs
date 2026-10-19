@@ -62,8 +62,31 @@ where
     }
     stream.flush().await?;
 
+    // Read the HTTP response properly: read headers, then body based on
+    // Content-Length, falling back to EOF when no length is declared.
+    let mut buf = [0u8; 4096];
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await?;
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break; // connection closed
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+            let head_str = std::str::from_utf8(&raw).unwrap_or("");
+            let content_len = head_str
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length: ").and_then(|v| v.trim().parse().ok())
+                })
+                .unwrap_or(0);
+            let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let body_so_far = raw.len() - header_end;
+            if content_len > 0 && body_so_far >= content_len {
+                break;
+            }
+        }
+    }
     parse_response(&raw)
 }
 
