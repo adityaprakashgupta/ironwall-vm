@@ -74,16 +74,17 @@ where
         raw.extend_from_slice(&buf[..n]);
         if raw.windows(4).any(|w| w == b"\r\n\r\n") {
             let head_str = std::str::from_utf8(&raw).unwrap_or("");
-            let content_len = head_str
+            let content_len: Option<usize> = head_str
                 .lines()
                 .find_map(|line| {
                     line.strip_prefix("Content-Length: ").and_then(|v| v.trim().parse().ok())
-                })
-                .unwrap_or(0);
+                });
             let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
             let body_so_far = raw.len() - header_end;
-            if content_len > 0 && body_so_far >= content_len {
-                break;
+            match content_len {
+                Some(0) => break,                              // Content-Length: 0, no body
+                Some(cl) if body_so_far >= cl => break,        // full body received
+                _ => {}                                        // keep reading (body incomplete or no Content-Length)
             }
         }
     }
