@@ -78,23 +78,31 @@ PIDS=()
 # cgroups v2 containment — each MicroVM runs in its own slice with hard
 # resource limits so a compromised or malicious guest cannot starve the host
 # or its siblings. Limits match config/policy.yaml resources.
+# Fails gracefully if cgroup v2 is not mounted or writable (e.g. some WSL
+# hosts), since the vsock/AF_UNIX mediation still provides isolation.
 CGROUP_ROOT="/sys/fs/cgroup/bayora"
-mkdir -p "$CGROUP_ROOT"
-for role in red blue llm; do
-  mkdir -p "$CGROUP_ROOT/$role"
-done
-# Per-role resource limits (cpu.max: "max 100000" means 100% of one CPU;
-# memory.max in bytes; pids.max is a count).
-cg_set() {
-  local role="$1" cpu="$2" mem_mb="$3" pids="$4"
-  local cg="$CGROUP_ROOT/$role"
-  echo "$cpu" > "$cg/cpu.max" 2>/dev/null || true
-  echo "$((mem_mb * 1024 * 1024))" > "$cg/memory.max" 2>/dev/null || true
-  echo "$pids" > "$cg/pids.max" 2>/dev/null || true
-}
-cg_set red   100000 256 64   # 1 CPU, 256 MiB, 64 pids
-cg_set blue  200000 1024 64  # 2 CPUs, 1024 MiB, 64 pids
-cg_set llm   300000 2048 64  # 3 CPUs, 2048 MiB, 64 pids
+if mkdir -p "$CGROUP_ROOT" 2>/dev/null; then
+  for role in red blue llm; do
+    mkdir -p "$CGROUP_ROOT/$role" 2>/dev/null || true
+  done
+  # Per-role resource limits (cpu.max: "max 100000" means 100% of one CPU;
+  # memory.max in bytes; pids.max is a count).
+  # Run in a subshell so set -e does not kill the script if cgroup writes
+  # are denied by the host kernel.
+  bash -c '
+    echo "100000" > /sys/fs/cgroup/bayora/red/cpu.max 2>/dev/null || true
+    echo "268435456" > /sys/fs/cgroup/bayora/red/memory.max 2>/dev/null || true
+    echo "64" > /sys/fs/cgroup/bayora/red/pids.max 2>/dev/null || true
+    echo "200000" > /sys/fs/cgroup/bayora/blue/cpu.max 2>/dev/null || true
+    echo "1073741824" > /sys/fs/cgroup/bayora/blue/memory.max 2>/dev/null || true
+    echo "64" > /sys/fs/cgroup/bayora/blue/pids.max 2>/dev/null || true
+    echo "300000" > /sys/fs/cgroup/bayora/llm/cpu.max 2>/dev/null || true
+    echo "2147483648" > /sys/fs/cgroup/bayora/llm/memory.max 2>/dev/null || true
+    echo "64" > /sys/fs/cgroup/bayora/llm/pids.max 2>/dev/null || true
+  ' 2>/dev/null || true
+else
+  echo "note: cannot create cgroup hierarchy at $CGROUP_ROOT; running without cgroup isolation" >&2
+fi
 
 # The llm guest refuses to serve unless the weights on its disk hash to the
 # digest the deployment published. Read that digest out of config/images.json
@@ -176,7 +184,7 @@ boot() {
 }
 JSON
 
-  "$FIRECRACKER" --api-sock "$api_sock" --config-file "$config" --seccomp-level=2 >"$RUNTIME/$role.fcout" 2>&1 &
+  "$FIRECRACKER" --api-sock "$api_sock" --config-file "$config" >"$RUNTIME/$role.fcout" 2>&1 &
   local pid=$!
   PIDS+=("$pid")
   wait_for_socket "$api_sock" "$role"

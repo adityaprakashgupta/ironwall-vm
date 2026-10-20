@@ -42,6 +42,12 @@ struct Args {
     #[arg(long, default_value = "tcp:127.0.0.1:9443")]
     signer: String,
 
+    /// TPM 2.0 device path for hardware-backed signing (e.g. /dev/tpmrm0).
+    /// When set, the Trust Anchor uses Tpm2HsmSigner instead of the software
+    /// socket signer. The device node must exist or startup fails closed.
+    #[arg(long)]
+    signer_device: Option<PathBuf>,
+
     /// Append-only evidence log (audit-trusted copy).
     #[arg(long, default_value = "evidence/evidence_log.ndjson")]
     evidence_log: PathBuf,
@@ -149,18 +155,53 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Signer: connect and pin keys (fail closed if unreachable).
     let endpoint = SignerEndpoint::parse(&args.signer).map_err(anyhow::Error::msg)?;
-    let signer = Arc::new(IsolatedSocketSigner::connect(endpoint).await.map_err(|e| {
-        anyhow::anyhow!("signer unreachable at {}: {e}", args.signer)
-    })?);
-    let issuer: Arc<dyn CapabilityIssuer> = signer.clone();
-    let trust_anchor: Arc<dyn TrustAnchorSigner> = signer.clone();
+    let (signer, issuer): (Arc<dyn TrustAnchorSigner>, Arc<dyn CapabilityIssuer>) =
+        match &args.signer_device {
+            Some(device) => {
+                // TPM 2.0 / hardware-backed signer path. Fails closed if the
+                // device node is absent. Two separate connections are made
+                // because Tpm2HsmSigner owns its inner socket signer.
+                let ta = bayora_referee::trust_anchor::Tpm2HsmSigner::connect(
+                    device.clone(),
+                    endpoint.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("TPM device {} unavailable: {e}", device.display())
+                })?;
+                let iss = bayora_referee::trust_anchor::Tpm2HsmSigner::connect(
+                    device.clone(),
+                    endpoint.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("TPM device {} unavailable: {e}", device.display())
+                })?;
+                (
+                    Arc::new(ta) as Arc<dyn TrustAnchorSigner>,
+                    Arc::new(iss) as Arc<dyn CapabilityIssuer>,
+                )
+            }
+            None => {
+                let s = Arc::new(
+                    IsolatedSocketSigner::connect(endpoint).await.map_err(|e| {
+                        anyhow::anyhow!("signer unreachable at {}: {e}", args.signer)
+                    })?,
+                );
+                (
+                    s.clone() as Arc<dyn TrustAnchorSigner>,
+                    s.clone() as Arc<dyn CapabilityIssuer>,
+                )
+            }
+        };
+    let trust_anchor = signer.clone();
     tracing::info!(
         trust_anchor = %signer.public_key_hex(),
-        issuer = %signer.issuer_public_key_hex(),
+        issuer = %issuer.issuer_public_key_hex(),
         "signer connected"
     );
     let guard = Arc::new(bayora_referee::CapabilityGuard::new(
-        IssuerPublicKey::from_hex(&signer.issuer_public_key_hex())
+        IssuerPublicKey::from_hex(&issuer.issuer_public_key_hex())
             .map_err(|e| anyhow::anyhow!("signer returned an unusable issuer key: {e}"))?,
         args.max_tracked_nonces,
     ));

@@ -357,6 +357,21 @@ impl TrustAnchorSigner for Tpm2HsmSigner {
     }
 }
 
+#[async_trait]
+impl CapabilityIssuer for Tpm2HsmSigner {
+    async fn issue_capability(
+        &self,
+        eval_id: &str,
+        ttl_ms: u64,
+    ) -> Result<CapabilityToken, SignerError> {
+        self.inner.issue_capability(eval_id, ttl_ms).await
+    }
+
+    fn issuer_public_key_hex(&self) -> String {
+        self.inner.issuer_public_key_hex()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
