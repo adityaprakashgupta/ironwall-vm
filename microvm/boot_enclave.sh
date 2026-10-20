@@ -75,6 +75,27 @@ done
 mkdir -p "$RUNTIME"
 PIDS=()
 
+# cgroups v2 containment — each MicroVM runs in its own slice with hard
+# resource limits so a compromised or malicious guest cannot starve the host
+# or its siblings. Limits match config/policy.yaml resources.
+CGROUP_ROOT="/sys/fs/cgroup/bayora"
+mkdir -p "$CGROUP_ROOT"
+for role in red blue llm; do
+  mkdir -p "$CGROUP_ROOT/$role"
+done
+# Per-role resource limits (cpu.max: "max 100000" means 100% of one CPU;
+# memory.max in bytes; pids.max is a count).
+cg_set() {
+  local role="$1" cpu="$2" mem_mb="$3" pids="$4"
+  local cg="$CGROUP_ROOT/$role"
+  echo "$cpu" > "$cg/cpu.max" 2>/dev/null || true
+  echo "$((mem_mb * 1024 * 1024))" > "$cg/memory.max" 2>/dev/null || true
+  echo "$pids" > "$cg/pids.max" 2>/dev/null || true
+}
+cg_set red   100000 256 64   # 1 CPU, 256 MiB, 64 pids
+cg_set blue  200000 1024 64  # 2 CPUs, 1024 MiB, 64 pids
+cg_set llm   300000 2048 64  # 3 CPUs, 2048 MiB, 64 pids
+
 # The llm guest refuses to serve unless the weights on its disk hash to the
 # digest the deployment published. Read that digest out of config/images.json
 # (what build_immutable_images.sh measured) and put it on the kernel command
@@ -100,6 +121,11 @@ cleanup() {
   if [ "$KEEP_TASK" = 0 ]; then
     rm -f "$RUNTIME/red-task.ext4"
   fi
+  # Release cgroups
+  for role in red blue llm; do
+    rmdir "$CGROUP_ROOT/$role" 2>/dev/null || true
+  done
+  rmdir "$CGROUP_ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -150,7 +176,7 @@ boot() {
 }
 JSON
 
-  "$FIRECRACKER" --api-sock "$api_sock" --config-file "$config" >"$RUNTIME/$role.fcout" 2>&1 &
+  "$FIRECRACKER" --api-sock "$api_sock" --config-file "$config" --seccomp-level=2 >"$RUNTIME/$role.fcout" 2>&1 &
   local pid=$!
   PIDS+=("$pid")
   wait_for_socket "$api_sock" "$role"
