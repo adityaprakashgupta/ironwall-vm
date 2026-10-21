@@ -19,20 +19,20 @@ The wire protocol is deliberately tiny (`bayora_common::signer_proto`):
 ```text
 SignerRequest::GetPubkeys
 SignerRequest::SignManifestDigest { digest: sha256:<hex> }   -> SignerResponse::Signature { .. }
-SignerRequest::SignTrustAnchorDigest { digest: sha256:<hex> }-> SignerResponse::Signature { .. }
-SignerRequest::SignMerkleRoot { root: sha256:<hex> }         -> SignerResponse::Signature { .. }
-SignerRequest::IssueCapability { eval_id, ttl_ms }           -> SignerResponse::Capability { .. }
+SignerRequest::SignTrustAnchorDigest { digest: sha256:<hex> } -> SignerResponse::Signature { .. }
+SignerRequest::SignMerkleRoot { root: sha256:<hex> }          -> SignerResponse::Signature { .. }
+SignerRequest::IssueCapability { eval_id, ttl_ms }            -> SignerResponse::Capability { .. }
 ```
 
 There is **no `GET_PRIVATE_KEY` operation**, no key-export request, and no
 request variant that returns a seed. The private key type is not reachable from
-the Referee at all: the Referee's dependency graph does not even link a signer
+the Referee at all: the Referee's dependency graph does not link a signer
 that owns a key — it links a *client* (`IsolatedSocketSigner`).
 
 > **Invariant.** If the Referee process is fully compromised, the attacker gains
 > the ability to *request signatures* (rate-limited by the socket), never the
-> ability to *read* the key. Key exfiltration is impossible by construction, not
-> by policy.
+> ability to *read* the key. Key exfiltration is impossible by construction,
+> not by policy.
 
 ## The boundary in code
 
@@ -56,16 +56,17 @@ pub trait CapabilityIssuer: Send + Sync {
   owned by the signer's UID with mode `0600`;
 * **development** — loopback TCP (`tcp:127.0.0.1:9443`).
 
-The socket handle is opaque and excluded from `Debug`; there is no field, method
-or accessor anywhere in the Referee that yields private bytes. The signer's own
-`SignerKeys` type exposes only public-key accessors.
+The socket handle is opaque and excluded from `Debug`; there is no field,
+method or accessor anywhere in the Referee that yields private bytes. The
+signer's own `SignerKeys` type exposes only public-key accessors.
 
 ## Key custody and lifecycle
 
 * Keys are generated on first run with a 32-byte random seed (64 hex chars) and
   persisted under `--key-dir` (`trust_anchor.sk`, `capability_issuer.sk`).
-* Public keys are written alongside as `trust_anchor.pk` / `capability_issuer.pk`
-  for parties that must **pin** them (the Verifier, the dashboard).
+* Public keys are written alongside as `trust_anchor.pk` /
+  `capability_issuer.pk` for parties that must **pin** them (the Verifier, the
+  dashboard).
 * The Referee pins the Trust Anchor public key at startup by asking the daemon
   (`GetPubkeys`) and checking the answer; a mismatch or an unreachable daemon is
   a **fail-closed** boot error (`ERR_SIGNER_UNAVAILABLE`). The enclave never
@@ -101,7 +102,9 @@ same module is the fail-closed seam for hardware custody:
 
 * **TPM 2.0** via `/dev/tpmrm0` — create a non-exportable Ed25519 (or ECDSA P-256)
   key under an owner-hierarchy primary; sign by submitting the digest to
-  `TPM2_Sign` through the resource manager.
+  `TPM2_Sign` through the resource manager. The key's `TPMA_OBJECT_NODA` (no
+  DA), `TPMA_OBJECT_NODA` and `TPMA_OBJECT_USERWITHAUTH` attributes prevent
+  dictionary attacks and unauthorized use.
 * **PKCS#11 HSM** — a `CKA_SIGN`-only, `CKA_EXTRACTABLE=false` key; the token
   refuses key export at the firmware level.
 
@@ -109,6 +112,34 @@ Both implement the *same two traits*, so the Referee is unchanged: swap the
 `Arc<dyn TrustAnchorSigner>` at construction. `Tpm2HsmSigner` currently returns
 `SignerError::Unavailable` rather than silently falling back to software —
 hardware custody that can be trivially bypassed is not custody.
+
+### TPM 2.0 key hierarchy
+
+The TPM key hierarchy used by `Tpm2HsmSigner` is:
+
+```
+Storage Root Key (SRK) -- persistent handle 0x81000001
+   └── Signing Key (EK-derived primary) -- non-exportable Ed25519/P-256
+          ├─ sign_digest(manifest_hash)
+          └─ sign_digest(merkle_root)
+```
+
+* The SRK is created once and persisted in NV index; it is bound to the TPM
+  and cannot be exported.
+* The signing key is generated inside the TPM (never exposed to host memory),
+  marked `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`, `noDA`, and
+  `userWithAuth`. It never leaves the TPM in plaintext.
+* To sign: the Referee sends a 32-byte digest over the socket; `Tpm2HsmSigner`
+  sends `TPM2_Sign` to the resource manager; the TPM returns the 64-byte
+  Ed25519 signature (or 64-byte P-256 signature) over exactly those bytes.
+
+### Attestation (optional)
+
+A TPM-backed Referee can additionally produce a `TPM2_Quote` over selected PCRs
+to prove to a remote auditor that the signing key lives inside the TPM and that
+the measured boot state matches the expected value. This is optional and not
+part of the enclave's core evidence path — the verifier trusts the pinned
+public key, not the TPM quote.
 
 ## Verification is separate from signing
 
@@ -121,9 +152,9 @@ Referee cannot substitute a manifest unless it also breaks Ed25519. See
 
 The Referee owns the turn counter; the client may not invent a turn that does
 not exist. A turn body carrying anything other than `turn: 1` is refused with
-`ERR_TURN_MISMATCH` (**HTTP 400**) *before* the capability gate is evaluated, so
-a malformed frame can never burn a legitimate single-use nonce. The same check
-runs on both ingress paths — HTTP (`control_plane.rs`) and VSOCK
+`ERR_TURN_MISMATCH` (**HTTP 400**) *before* the capability gate is evaluated,
+so a malformed frame can never burn a legitimate single-use nonce. The same
+check runs on both ingress paths — HTTP (`control_plane.rs`) and VSOCK
 (`vsock_server.rs`) — because Red speaks VSOCK in production. See
 [`../README.md`](../README.md) for the full flow.
 
@@ -138,3 +169,14 @@ into the Referee's address space would fail to compile or fail at runtime:
 * `bayora-referee::tests` — manifest signatures and batch-seal signatures
   verifying against the daemon's public keys; capability mint/verify/replay and
   cross-evaluation refusal; reconnect after a dropped socket.
+
+## Failure modes
+
+| Failure | Behavior |
+|---|---|
+| Signer daemon unreachable at startup | Referee exits immediately (fail-closed) |
+| Signer daemon dies mid-run | Next request fails with `ResetError::Unavailable` / `GuardError`; Referee does not fall back to software |
+| TPM device missing | `--firecracker-api` with `--signer-device` fails at startup with a clear error |
+| TPM key absent | `Tpm2HsmSigner::connect` fails at startup |
+| Socket write fails mid-request | Single reconnect attempt; if that fails, error is surfaced to the caller — no silent fallback |
+| Signature verification fails | Verifier rejects the log with `ERR_INVALID_SIGNATURE` and pinpoints the record |
