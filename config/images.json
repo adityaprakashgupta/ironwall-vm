@@ -1,8 +1,8 @@
 {
-  "kernel_digest": "sha256:89303a7b37665512e4f816df85f32ae26fa046f449116990297a0bbb7bcca13d",
-  "red_image_digest": "sha256:54692244baabfdae157578baca8abf05ae13514bfd3c6a88d0a3fe08b369c17d",
-  "blue_image_digest": "sha256:54d1ef772562fa161a0ec94361e1b9d64771415c54e7de25a4922c5ff05f3a11",
-  "llm_image_digest": "sha256:53cf9082ba3d2079768ba062103882e2d4bda6ea8a1218d0a72f5efe498c4f24",
+  "kernel_digest": "sha256:f697969a2f005d296e8c5e2fcd0f6a4f305eb3a06b085d3930d10f1eab3a0883",
+  "red_image_digest": "sha256:0d918260e711b691314c1598cbfff0ccfc53b74511fe91ce331be6b95933fb82",
+  "blue_image_digest": "sha256:42740fe70985866fb9ac769faac839fbd1bfc9980292a618834c5002854c7264",
+  "llm_image_digest": "sha256:97af5f3a64f49044d6092a9661b683132d706545c06d19a2195118efaa487d79",
   "model_digest": "sha256:74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
   "blue_policy_digest": "sha256:d7410617d2e61b54ca5e3934100ca46188918dfff64be6718bef040eab0075f4",
   "firecracker_version": "v1.17.0"

@@ -384,9 +384,17 @@ impl FirecrackerSnapshotManager {
     async fn fc_put(&self, path: &str, body: &serde_json::Value) -> Result<(), ResetError> {
         #[cfg(unix)]
         {
+            eprintln!(
+                "[DEBUG fc_put] starting PUT {} to {}",
+                path, self.api_sock.display()
+            );
             // Bind the serialized body: the request future borrows it, so it
             // must outlive the `timeout(...).await` below.
             let body_bytes = serde_json::to_vec(body).unwrap_or_default();
+            eprintln!(
+                "[DEBUG fc_put] body_bytes={} bytes",
+                body_bytes.len()
+            );
             let fut = mini_http::unix_request(
                 &self.api_sock,
                 "localhost",
@@ -396,12 +404,23 @@ impl FirecrackerSnapshotManager {
             );
             let response = tokio::time::timeout(self.http_timeout, fut)
                 .await
-                .map_err(|_| ResetError::Unavailable(format!(
-                    "firecracker api {} did not answer within {:?}",
-                    self.api_sock.display(),
-                    self.http_timeout
-                )))?
+                .map_err(|_| {
+                    eprintln!(
+                        "[DEBUG fc_put] timeout waiting for response from {}",
+                        self.api_sock.display()
+                    );
+                    ResetError::Unavailable(format!(
+                        "firecracker api {} did not answer within {:?}",
+                        self.api_sock.display(),
+                        self.http_timeout
+                    ))
+                })?
                 .map_err(|e| ResetError::Io(format!("{}: {e}", self.api_sock.display())))?;
+            eprintln!(
+                "[DEBUG fc_put] response status={} is_success={}",
+                response.status,
+                response.is_success()
+            );
             if response.is_success() {
                 return Ok(());
             }

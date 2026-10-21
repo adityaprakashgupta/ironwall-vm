@@ -153,6 +153,14 @@ boot() {
   local vsock_uds="$RUNTIME/$role.vsock"
   local log="$RUNTIME/$role.log"
 
+  # Referee owns the llm Firecracker process (via --reset snapshot with
+  # with_process()). boot_enclave.sh only boots blue and red; Referee
+  # spawns llm firecracker, loads golden snapshot, and brings it up.
+  if [ "$role" = llm ]; then
+    echo "    cid $cid  llm  skipped (Referee owns llm Firecracker process)"
+    return 0
+  fi
+
   rm -f "$api_sock" "$vsock_uds"
 
   # One drive for the read-only rootfs, plus optional extra drives (red gets
@@ -271,9 +279,6 @@ def wait(sock_path, port, message, predicate, label, timeout=20.0):
 wait(os.path.join(runtime, "blue.vsock"), 9001,
      {"eval_id": "probe", "prompt": "hello"},
      lambda r: r.get("decision") == "allow", "blue answered a verdict")
-wait(os.path.join(runtime, "llm.vsock"), 9002,
-     {"eval_id": "probe", "prompt": "hello", "max_tokens": 8},
-     lambda r: "output" in r, "llm answered a completion")
 PY
 
 if [ -n "$TASK" ]; then
