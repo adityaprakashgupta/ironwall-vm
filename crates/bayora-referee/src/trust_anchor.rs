@@ -319,16 +319,13 @@ pub struct Tpm2HsmSigner {
 impl Tpm2HsmSigner {
     /// Fails if the device node is absent — no silent software fallback.
     pub async fn connect(device: PathBuf, endpoint: SignerEndpoint) -> Result<Self, SignerError> {
-        let device_ok = if device.exists() {
-            true
-        } else {
+        if !device.exists() {
             // On non-unix dev hosts the node cannot exist; report clearly.
             return Err(SignerError::Unavailable(format!(
                 "hardware trust anchor device {} not present",
                 device.display()
             )));
-        };
-        debug_assert!(device_ok);
+        }
         let inner = IsolatedSocketSigner::connect(endpoint.clone()).await?;
         Ok(Tpm2HsmSigner {
             device,

@@ -12,7 +12,7 @@ common/
 red-team/agent.py    the adversary: speaks the frame protocol to the Referee
 blue-team/agent.py   the defence stages: answers the Referee with a verdict
 llm-engine/agent.py  the model: answers the Referee with a completion
-tests/test_workloads.py  24 tests, runnable anywhere (no AF_VSOCK needed)
+tests/test_workloads.py  25 tests, runnable anywhere (no AF_VSOCK needed)
 ```
 
 ## Who may talk to whom

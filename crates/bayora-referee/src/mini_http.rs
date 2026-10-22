@@ -71,25 +71,14 @@ where
         let n = match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
             Ok(n) => match n {
                 Ok(n) => n,
-                Err(e) => {
-                    eprintln!(
-                        "[DEBUG fc_put] stream read error after {} bytes read: {}",
-                        raw.len(), e
-                    );
-                    break;
-                }
+                Err(_) => break,
             },
-            Err(_) => {
-                eprintln!("[DEBUG fc_put] read timeout after {} bytes read", raw.len());
-                break;
-            }
+            Err(_) => break,
         };
         if n == 0 {
-            eprintln!("[DEBUG fc_put] connection closed after {} bytes read", raw.len());
             break; // connection closed
         }
         raw.extend_from_slice(&buf[..n]);
-        eprintln!("[DEBUG fc_put] read {} bytes, total {} bytes", n, raw.len());
         if raw.windows(4).any(|w| w == b"\r\n\r\n") {
             let head_str = std::str::from_utf8(&raw).unwrap_or("");
             let content_len: Option<usize> = head_str
@@ -99,10 +88,6 @@ where
                 });
             let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
             let body_so_far = raw.len() - header_end;
-            eprintln!(
-                "[DEBUG fc_put] headers found, content_len={:?}, body_so_far={}",
-                content_len, body_so_far
-            );
             match content_len {
                 Some(0) => break,                              // Content-Length: 0, no body
                 Some(cl) if body_so_far >= cl => break,        // full body received
@@ -111,9 +96,6 @@ where
             }
         }
     }
-    eprintln!(
-        "[DEBUG fc_put] done reading, total {} bytes", raw.len()
-    );
     parse_response(&raw)
 }
 

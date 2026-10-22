@@ -202,7 +202,8 @@ class GuestAgentTests(unittest.TestCase):
             )
             llm.handle(right)
             response = wire.read_message(left)
-        self.assertIn("hello", response["output"])
+        self.assertIn("prompt_hash", response["output"])
+        self.assertIn("model_hash", response["output"])
 
     def test_red_agent_task_validation(self):
         red = load_agent(RED, "red_agent")

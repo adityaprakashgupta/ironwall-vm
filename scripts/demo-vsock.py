@@ -485,6 +485,7 @@ def main(argv=None) -> int:
         print("==> 0. Preflight")
         probe_vsock_available()
         print(f"    AF_VSOCK loopback   : CID {VSOCK_CID} works (guest CIDs would be 4/5)")
+        os.makedirs(os.path.dirname(EVIDENCE_LOG), exist_ok=True)
         if os.path.exists(EVIDENCE_LOG) and os.path.getsize(EVIDENCE_LOG) > 0:
             raise DemoError(
                 f"{os.path.relpath(EVIDENCE_LOG, ROOT)} already has evidence in it, and\n"

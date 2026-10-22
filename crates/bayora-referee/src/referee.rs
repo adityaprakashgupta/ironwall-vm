@@ -310,7 +310,18 @@ impl RefereeState {
         token: &CapabilityToken,
         prompt: &str,
     ) -> Result<TurnOutcome, RefereeError> {
-        // 1. Capability gate (stateful single-use + cryptographic binding).
+        // 1. Ingress frame gate — reject oversized prompts *before* consuming
+        //    the single-use capability nonce, matching the VSOCK ingress path
+        //    where oversized frames are refused before `run_turn` is entered.
+        if prompt.len() > self.policy.max_prompt_bytes() {
+            self.metrics.record_frame_rejection();
+            return Err(RefereeError::Frame(FrameError::TooLarge {
+                got: prompt.len(),
+                max: self.policy.max_prompt_bytes(),
+            }));
+        }
+
+        // 2. Capability gate (stateful single-use + cryptographic binding).
         if let Err(e) = self.guard.consume(token, evaluation_id, now_unix_ms()) {
             match &e {
                 GuardError::ReplayDenied { .. } => self.metrics.record_capability_replay(),
@@ -320,15 +331,6 @@ impl RefereeState {
                 _ => {}
             }
             return Err(RefereeError::Capability(e));
-        }
-
-        // 2. Ingress frame gate — reject before doing any downstream work.
-        if prompt.len() > self.policy.max_prompt_bytes() {
-            self.metrics.record_frame_rejection();
-            return Err(RefereeError::Frame(FrameError::TooLarge {
-                got: prompt.len(),
-                max: self.policy.max_prompt_bytes(),
-            }));
         }
 
         // Claim the open evaluation (one turn per evaluation).
@@ -418,7 +420,15 @@ impl RefereeState {
                 elapsed_us: work_us,
             });
         }
-        let (frame, truncated) = pad_response(&envelope, self.policy.response_frame_bytes())?;
+        let (frame, truncated) = match pad_response(&envelope, self.policy.response_frame_bytes()) {
+            Ok(result) => result,
+            Err(e) => {
+                // Evidence emission failed after a completed route: restore the
+                // evaluation so it can be retried with a fresh capability.
+                self.open.lock().await.insert(evaluation_id.to_string(), eval);
+                return Err(RefereeError::Frame(e));
+            }
+        };
         let response_digest = Digest::of(&frame);
         eval.events.push(EvaluationEvent::ResponseReleased {
             evaluation_id: evaluation_id.to_string(),
@@ -428,10 +438,19 @@ impl RefereeState {
             response_digest: response_digest.to_hex(),
         });
 
-        let record = self
+        let record = match self
             .evidence
             .emit_evaluation(&eval.manifest, eval.manifest_signature.clone(), &eval.events)
-            .await?;
+            .await
+        {
+            Ok(record) => record,
+            Err(e) => {
+                // Evidence emission failed after a completed route: restore the
+                // evaluation so it can be retried with a fresh capability.
+                self.open.lock().await.insert(evaluation_id.to_string(), eval);
+                return Err(RefereeError::Evidence(e));
+            }
+        };
         let (seq, chain_hash) = match &record {
             EvidenceRecord::Evaluation { seq, chain_hash, .. } => {
                 (*seq, Digest::from_hex(chain_hash).map_err(|e| RefereeError::Internal(e.to_string()))?)
