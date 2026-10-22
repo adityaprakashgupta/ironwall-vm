@@ -45,6 +45,8 @@
 #
 #   Optional:
 #     --image-size <MiB>   override the computed size for every role
+#     --llama-wheel <whl>  prebuilt llama-cpp-python wheel for LLM guest
+#                          (guests have no pip/network; must be staged at build)
 #     --skip-golden        do not boot the llm image / take the golden snapshot
 #     --golden-only        skip building the images; regenerate the golden
 #                          snapshot from the already-built llm image and
@@ -77,6 +79,7 @@ IMAGE_SIZE_MB=""   # empty = compute per role from the staged content
 SKIP_GOLDEN=0
 GOLDEN_ONLY=0
 FIRECRACKER="${FIRECRACKER:-firecracker}"
+LLAMA_WHEEL=""     # path to prebuilt llama-cpp-python wheel for the LLM guest
 
 usage() {
   sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'
@@ -91,6 +94,7 @@ while [ $# -gt 0 ]; do
     --skip-golden)  SKIP_GOLDEN=1; shift ;;
     --golden-only)  GOLDEN_ONLY=1; shift ;;
     --firecracker)  FIRECRACKER="$2"; shift 2 ;;
+    --llama-wheel)  LLAMA_WHEEL="$2"; shift 2 ;;
     -h|--help)      usage 0 ;;
     *)              echo "unknown argument: $1" >&2; usage 2 ;;
   esac
@@ -140,6 +144,19 @@ if [ ! -f "$MODEL" ]; then
   die "model weights not found: $MODEL
        Supply the weights with --model <path>. A deployment that cannot prove
        which weights it ran cannot prove anything else about its answers."
+fi
+
+# The llama-cpp-python wheel provides real inference inside the LLM guest.
+# It must be prebuilt for the guest's Python version and architecture; guests
+# have no package index and no network, so it must be staged at build time.
+if [ -n "$LLAMA_WHEEL" ]; then
+  [ -f "$LLAMA_WHEEL" ] || die "llama-cpp-python wheel not found: $LLAMA_WHEEL"
+  case "$LLAMA_WHEEL" in
+    *.whl) ;;
+    *) die "--llama-wheel must be a .whl file, got: $LLAMA_WHEEL" ;;
+  esac
+else
+  echo "note: no --llama-wheel given; LLM guest will use hash-based fallback inference"
 fi
 
 BUSYBOX="$(command -v busybox || true)"
@@ -289,6 +306,22 @@ stage_guest() {
   if [ "$role" = llm ]; then
     cp "$MODEL" "$stage/opt/bayora/model.gguf"
     chmod 0444 "$stage/opt/bayora/model.gguf"
+
+    # Stage llama-cpp-python wheel and its native shared libraries so the LLM
+    # guest can run real inference without a package index or network.
+    if [ -n "$LLAMA_WHEEL" ]; then
+      local llama_stage="$stage/usr/lib/python3/site-packages"
+      mkdir -p "$llama_stage"
+      # Unpack the wheel (it's a zip) directly into site-packages.
+      python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('$LLAMA_WHEEL') as z:
+    z.extractall('$llama_stage')
+"
+      # Stage shared library dependencies of the compiled llama backend.
+      stage_libs_for "$llama_stage/llama_cpp/libllama.so" "$stage" 2>/dev/null || true
+      stage_libs_for "$llama_stage/llama_cpp/_llama.so" "$stage" 2>/dev/null || true
+    fi
   fi
 }
 

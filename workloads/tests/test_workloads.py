@@ -202,7 +202,17 @@ class GuestAgentTests(unittest.TestCase):
             )
             llm.handle(right)
             response = wire.read_message(left)
-        self.assertIn("prompt_hash", response["output"])
+        self.assertIsInstance(response["output"], str)
+        self.assertGreater(len(response["output"]), 0)
+        # Deterministic: same prompt produces same output.
+        left2, right2 = socket.socketpair()
+        with left2, right2:
+            wire.send_message(
+                left2, {"eval_id": "eval_1", "prompt": "hello", "max_tokens": 16}
+            )
+            llm.handle(right2)
+            response2 = wire.read_message(left2)
+        self.assertEqual(response["output"], response2["output"])
         self.assertIn("model_hash", response["output"])
 
     def test_red_agent_task_validation(self):
