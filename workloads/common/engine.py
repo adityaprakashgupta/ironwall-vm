@@ -29,9 +29,17 @@ MAX_TOKENS_CEILING = 512
 #: run inside a Firecracker MicroVM.
 MODEL_PATH = os.environ.get("BAYORA_MODEL_PATH", "/opt/bayora/model.gguf")
 
-#: Wall-clock timeout for a single inference call (seconds). The Referee's
-#: EVAL_500 bucket is 500 ms, so inference must finish well inside that.
-INFERENCE_TIMEOUT_SECONDS = 0.45
+#: Wall-clock timeout for a single inference call (seconds). On a slow CPU,
+#: generating even a few tokens can take several hundred ms. The Referee's
+#: EVAL_500 bucket (500 ms) will still cancel work past 485 ms; this timeout
+#: only guards against pathological hangs. For meaningful generation on CPU,
+#: use EVAL_1000 mode (1000 ms bucket) or dedicated inference hardware.
+INFERENCE_TIMEOUT_SECONDS = 2.0
+
+#: Wall-clock timeout for loading the model on first call (seconds). In the
+#: MicroVM the model is loaded once at VM startup; this timeout only matters
+#: for development hosts where the model is loaded lazily.
+MODEL_LOAD_TIMEOUT_SECONDS = 10.0
 
 #: Deterministic fallback digest used when the model file is absent.
 _FALLBACK_MODEL_DIGEST = "00" * 32

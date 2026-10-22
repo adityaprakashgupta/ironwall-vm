@@ -39,8 +39,20 @@ def handle(sock) -> None:
     except (TypeError, ValueError) as exc:
         sys.stderr.write(f"llm: refusing request: {exc}\n")
         return
+    except Exception as exc:
+        # Catch-all for unexpected inference errors (e.g. model load failure,
+        # tokenizer errors, etc.). Fail-closed: don't send a partial response.
+        sys.stderr.write(f"llm: inference error: {type(exc).__name__}: {exc}\n")
+        return
 
-    wire.send_message(sock, response)
+    try:
+        wire.send_message(sock, response)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+        # The client (Referee) closed the connection before we could send the
+        # response — typically because the timing guard cancelled the future.
+        # This is not a crash; just close the connection and serve the next one.
+        sys.stderr.write(f"llm: client disconnected before response: {type(exc).__name__}\n")
+        return
 
 
 def serve(port: int = wire.LLM_PORT) -> None:
