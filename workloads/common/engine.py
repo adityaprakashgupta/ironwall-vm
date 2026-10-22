@@ -5,12 +5,12 @@ evaluations (`--reset kv`, `LogicalKvResetManager`) so that no prompt can
 influence the next evaluation through residual model state — that is the
 "Resettable" pillar.
 
-This file loads the model weights file using llama-cpp-python (open-source
-llama.cpp bindings) and runs real bounded inference. When llama-cpp-python is
-not available (development hosts outside the MicroVM), it falls back to a
-deterministic hash-based stand-in so the agent remains functional for testing.
-The same evaluation always produces the same evidence. It never sees which
-stage let the prompt through, only the prompt itself.
+This file loads the model weights file using an open-source LLM inference
+engine (llama-cpp-python or ctransformers) and runs real bounded inference.
+When no inference engine is available (development hosts outside the MicroVM),
+it falls back to a deterministic hash-based stand-in so the agent remains
+functional for testing. The same evaluation always produces the same evidence.
+It never sees which stage let the prompt through, only the prompt itself.
 """
 
 from __future__ import annotations
@@ -39,29 +39,32 @@ _FALLBACK_MODEL_DIGEST = "00" * 32
 #: Chunk size for hashing fallback — large enough to do real CPU work per turn.
 CHUNK_SIZE = 1 << 20  # 1 MiB
 
-#: Cached loaded llama model (real inference mode).
+#: Cached inference backend handle (None = not yet loaded).
 _model = None
 #: Cached model hash (fallback mode).
 _model_digest = None
-#: Whether real llama inference is available (None = not yet probed).
-_using_llama = None
+#: Which backend is active: "llama-cpp-python", "ctransformers", or None.
+_backend = None
 
 
-def _try_load_llama() -> bool:
-    """Attempt to import and initialize llama-cpp-python.
+def _try_load_backend() -> str | None:
+    """Attempt to initialize an LLM inference backend.
 
-    Returns True if real inference is available, False otherwise. Results are
-    cached so the probe happens at most once per VM lifetime.
+    Tries llama-cpp-python first, then ctransformers, then falls back to None.
+    Results are cached so the probe happens at most once per VM lifetime.
+
+    Returns the backend name if available, None otherwise.
     """
-    global _using_llama, _model
-    if _using_llama is not None:
-        return _using_llama
+    global _backend, _model
+    if _backend is not None:
+        return _backend
 
     if not os.path.exists(MODEL_PATH):
-        _using_llama = False
+        _backend = None
         _model = None
-        return False
+        return None
 
+    # Try llama-cpp-python first (preferred, direct llama.cpp bindings).
     try:
         from llama_cpp import Llama  # type: ignore
 
@@ -71,11 +74,30 @@ def _try_load_llama() -> bool:
             n_threads=1,
             verbose=False,
         )
-        _using_llama = True
+        _backend = "llama-cpp-python"
+        return _backend
     except Exception:
         _model = None
-        _using_llama = False
-    return _using_llama
+
+    # Try ctransformers as a fallback backend.
+    try:
+        from ctransformers import AutoModelForCausalLM  # type: ignore
+
+        _model = AutoModelForCausalLM.from_pretrained(
+            MODEL_PATH,
+            model_type="qwen",
+            max_new_tokens=MAX_TOKENS_CEILING,
+            temperature=0.0,
+            context_length=512,
+            threads=1,
+        )
+        _backend = "ctransformers"
+        return _backend
+    except Exception:
+        _model = None
+
+    _backend = None
+    return None
 
 
 def _hash_model() -> str:
@@ -116,10 +138,11 @@ def _clip(text: str, max_tokens: int) -> str:
 def respond(prompt: str, max_tokens: int) -> dict:
     """Return `{"output": ...}`, shaped like the Referee's `LlmResponse`.
 
-    Uses real llama-cpp-python inference when available; falls back to a
-    deterministic hash-based stand-in for development hosts without the
-    inference engine. Bounded by `max_tokens` and a wall-clock timeout so the
-    Referee's timing bucket can hold or cancel the work.
+    Uses real LLM inference via llama-cpp-python or ctransformers when
+    available; falls back to a deterministic hash-based stand-in for
+    development hosts without the inference engine or model weights.
+    Bounded by `max_tokens` and a wall-clock timeout so the Referee's timing
+    bucket can hold or cancel the work.
     """
     if not isinstance(prompt, str):
         raise TypeError("prompt must be a string")
@@ -130,7 +153,9 @@ def respond(prompt: str, max_tokens: int) -> dict:
             f"max_tokens {max_tokens} exceeds the {MAX_TOKENS_CEILING} ceiling"
         )
 
-    if _try_load_llama():
+    backend = _try_load_backend()
+
+    if backend == "llama-cpp-python":
         # Real inference via llama-cpp-python.
         started = time.monotonic()
         try:
@@ -150,7 +175,26 @@ def respond(prompt: str, max_tokens: int) -> dict:
         except Exception as exc:
             # Fail-closed: if inference fails, return a deterministic refusal
             # rather than leaking partial or error state.
-            output = f"[llm-engine] inference error: {type(exc).__name__}"
+            output = f"[llm-engine:llama-cpp] inference error: {type(exc).__name__}"
+    elif backend == "ctransformers":
+        # Real inference via ctransformers.
+        started = time.monotonic()
+        try:
+            output = _model(
+                prompt,
+                max_new_tokens=max_tokens,
+                temperature=0.0,
+            )
+            elapsed = time.monotonic() - started
+            if elapsed > INFERENCE_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"inference exceeded {INFERENCE_TIMEOUT_SECONDS}s budget"
+                )
+            if isinstance(output, list):
+                output = output[0].get("generated_text", str(output))
+        except Exception as exc:
+            # Fail-closed: if inference fails, return a deterministic refusal.
+            output = f"[llm-engine:ctransformers] inference error: {type(exc).__name__}"
     else:
         # Fallback: deterministic hash-based stand-in for dev hosts.
         model_hash = _hash_model()
