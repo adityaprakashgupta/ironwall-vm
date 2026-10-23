@@ -80,6 +80,17 @@ SKIP_GOLDEN=0
 GOLDEN_ONLY=0
 FIRECRACKER="${FIRECRACKER:-firecracker}"
 LLAMA_WHEEL=""     # path to prebuilt llama-cpp-python wheel for the LLM guest
+# Reproducibility: stamp every file and filesystem metadata with a fixed epoch
+# so that rebuilding from the same source tree yields byte-identical images.
+# Set SOURCE_DATE_EPOCH in the environment to override; defaults to the Unix
+# epoch (1970-01-01), the earliest value ext4 can represent sanely.
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+export SOURCE_DATE_EPOCH
+
+# Use a tmpdir with enough disk space for large image staging (the llm image
+# is ~828 MB).  Defaults to /tmp but can be overridden via TMPDIR in the
+# environment for hosts with small /tmp filesystems.
+export TMPDIR="${TMPDIR:-/tmp}"
 
 usage() {
   sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'
@@ -377,6 +388,9 @@ build_image() {
   esac
 
   dd if=/dev/zero of="$out" bs=1M count="$size_mb" status=none
+  # Normalise every staged file/directory mtime to SOURCE_DATE_EPOCH so the
+  # ext4 metadata is a function of content, not build time.
+  find "$stage" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
   # Run as root so `-d` copies the payload with root:root ownership, which is
   # all the guest needs (init mounts it read-only and never writes to it).
   mke2fs -q -t ext4 -F -b 1024 -I 128 -L "$label" -U "$uuid" -d "$stage" "$out"
@@ -384,6 +398,11 @@ build_image() {
   e2fsck -f -y "$out" >/dev/null 2>&1 || true
   resize2fs -M "$out" >/dev/null 2>&1 || true
   e2fsck -f -y "$out" >/dev/null 2>&1 || true
+  # Pin the filesystem creation/check times to the same epoch so superblock
+  # metadata does not vary between builds.  Runs after e2fsck/resize2fs so
+  # those tools cannot reset the clock.
+  debugfs -w -R "set_super_value ctime $SOURCE_DATE_EPOCH" "$out" >/dev/null 2>&1 || true
+  debugfs -w -R "set_super_value mtime $SOURCE_DATE_EPOCH" "$out" >/dev/null 2>&1 || true
 
   chmod 0444 "$out"
   echo "    $(sha256sum "$out" | cut -d' ' -f1)  $(basename "$out")"

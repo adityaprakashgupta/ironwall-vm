@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -315,57 +316,93 @@ impl FirecrackerUdsTransport {
         TReq: Serialize,
         TResp: for<'de> Deserialize<'de>,
     {
+        let endpoint = format!("fc-vsock:{}:{port}", uds.display());
+
+        // Firecracker's vsock mediation can occasionally drop a connection
+        // right after a previous one on the same guest port closes (early EOF
+        // during the `CONNECT <port>` handshake). Retry transient handshake
+        // failures so a single flaky connection never aborts a turn.
+        let mut last_err: Option<TransportError> = None;
+        for attempt in 1..=3 {
+            match tokio::time::timeout(self.timeout, Self::call_once(uds, port, request, &endpoint)).await
+            {
+                Ok(Ok(resp)) => return Ok(resp),
+                Ok(Err(e)) => {
+                    // Permanent failures (malformed, non-OK ack) are not retried.
+                    if matches!(e, TransportError::Malformed(_)) {
+                        return Err(e);
+                    }
+                    let e_str = e.to_string();
+                    last_err = Some(e);
+                    warn!(attempt, endpoint, error = %e_str, "fc-vsock call attempt failed, retrying");
+                }
+                Err(_) => {
+                    last_err = Some(TransportError::Timeout {
+                        endpoint: endpoint.to_string(),
+                        timeout_ms: self.timeout.as_millis() as u64,
+                    });
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
+        }
+        Err(last_err.take().unwrap_or_else(|| {
+            TransportError::Io(format!("{endpoint}: all retries exhausted"))
+        }))
+    }
+
+    /// Single attempt at a Firecracker-mediated vsock call: connect, perform
+    /// the `CONNECT <port>` handshake, then exchange one framed request.
+    async fn call_once<TReq, TResp>(
+        uds: &Path,
+        port: u32,
+        request: &TReq,
+        endpoint: &str,
+    ) -> Result<TResp, TransportError>
+    where
+        TReq: Serialize,
+        TResp: for<'de> Deserialize<'de>,
+    {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let endpoint = format!("fc-vsock:{}:{port}", uds.display());
-        let fut = async {
-            let mut stream = tokio::net::UnixStream::connect(uds)
-                .await
-                .map_err(|e| TransportError::Io(format!("{endpoint}: {e}")))?;
+        let mut stream = tokio::net::UnixStream::connect(uds)
+            .await
+            .map_err(|e| TransportError::Io(format!("{endpoint}: {e}")))?;
 
-            // Firecracker's handshake: ask for the guest port and require the
-            // exact ack. The device terminates the connection instead of
-            // answering when the guest has nothing listening there, so a
-            // refused call surfaces here rather than as a silent hang.
+        // Firecracker's handshake: ask for the guest port and require the
+        // exact ack. The device terminates the connection instead of
+        // answering when the guest has nothing listening there, so a
+        // refused call surfaces here rather than as a silent hang.
+        stream
+            .write_all(format!("CONNECT {port}\n").as_bytes())
+            .await
+            .map_err(|e| TransportError::Io(format!("{endpoint} handshake write: {e}")))?;
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
             stream
-                .write_all(format!("CONNECT {port}\n").as_bytes())
+                .read_exact(&mut byte)
                 .await
-                .map_err(|e| TransportError::Io(format!("{endpoint} handshake write: {e}")))?;
-            let mut line = Vec::new();
-            loop {
-                let mut byte = [0u8; 1];
-                stream
-                    .read_exact(&mut byte)
-                    .await
-                    .map_err(|e| TransportError::Io(format!("{endpoint} handshake read: {e}")))?;
-                if byte[0] == b'\n' {
-                    break;
-                }
-                line.push(byte[0]);
-                if line.len() > 32 {
-                    return Err(TransportError::Malformed(format!(
-                        "{endpoint}: oversized handshake line"
-                    )));
-                }
+                .map_err(|e| TransportError::Io(format!("{endpoint} handshake read: {e}")))?;
+            if byte[0] == b'\n' {
+                break;
             }
-            let ack = std::str::from_utf8(&line).map_err(|_| {
-                TransportError::Malformed(format!("{endpoint}: non-UTF-8 handshake"))
-            })?;
-            if !ack.starts_with("OK ") {
+            line.push(byte[0]);
+            if line.len() > 32 {
                 return Err(TransportError::Malformed(format!(
-                    "{endpoint}: handshake answered {ack:?}"
+                    "{endpoint}: oversized handshake line"
                 )));
             }
+        }
+        let ack = std::str::from_utf8(&line).map_err(|_| {
+            TransportError::Malformed(format!("{endpoint}: non-UTF-8 handshake"))
+        })?;
+        if !ack.starts_with("OK ") {
+            return Err(TransportError::Malformed(format!(
+                "{endpoint}: handshake answered {ack:?}"
+            )));
+        }
 
-            framed_call(&mut stream, &endpoint, request).await
-        };
-
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| TransportError::Timeout {
-                endpoint,
-                timeout_ms: self.timeout.as_millis() as u64,
-            })?
+        framed_call(&mut stream, endpoint, request).await
     }
 }
 

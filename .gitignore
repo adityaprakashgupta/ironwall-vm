@@ -19,3 +19,5 @@ node_modules/
 # Python (guest agents, demos, dashboard)
 __pycache__/
 *.pyc
+.tmp/
+microvm/wheels/

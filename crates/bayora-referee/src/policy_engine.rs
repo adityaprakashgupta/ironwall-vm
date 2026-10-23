@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(engine.abort_margin(), Duration::from_millis(15));
         assert_eq!(engine.max_prompt_bytes(), 8192);
         assert_eq!(engine.response_frame_bytes(), 4096);
-        assert_eq!(engine.max_tokens(), 64);
+        assert_eq!(engine.max_tokens(), 8);
         assert_eq!(engine.reset_policy(), ResetPolicy::Snapshot);
         assert!(!engine.cache_prompt());
         assert_eq!(engine.batch_size(), 8);
