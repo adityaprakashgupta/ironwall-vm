@@ -24,6 +24,31 @@ import time
 #: not be talked into doing unbounded work by a malformed request.
 MAX_TOKENS_CEILING = 512
 
+#: Set LD_LIBRARY_PATH for llama-cpp-python shared libraries inside the MicroVM.
+#: The wheel stages .so files under site-packages/llama_cpp/lib/, which is not
+#: on the default library search path inside the guest.
+_llama_lib_dir = None
+for _candidate in [
+    "/usr/local/lib64/python3.14/site-packages/llama_cpp/lib",
+    "/usr/lib/python3/site-packages/llama_cpp/lib",
+    "/usr/lib/python3.11/site-packages/llama_cpp/lib",
+    "/usr/lib/python3.12/site-packages/llama_cpp/lib",
+    "/usr/lib/python3.13/site-packages/llama_cpp/lib",
+    "/usr/lib/python3.14/site-packages/llama_cpp/lib",
+]:
+    if os.path.isdir(_candidate):
+        _llama_lib_dir = _candidate
+        break
+if _llama_lib_dir is None:
+    # Fallback: search common locations
+    import glob as _glob
+    _matches = _glob.glob("/usr/lib/python3*/site-packages/llama_cpp/lib") + _glob.glob("/usr/local/lib64/python3*/site-packages/llama_cpp/lib")
+    if _matches:
+        _llama_lib_dir = _matches[0]
+if _llama_lib_dir is not None:
+    _existing = os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = _llama_lib_dir + (":" + _existing if _existing else "")
+
 #: Where the model weights live inside the guest image. Can be overridden via
 #: the BAYORA_MODEL_PATH environment variable for development hosts that do not
 #: run inside a Firecracker MicroVM.
@@ -84,7 +109,18 @@ def _try_load_backend() -> str | None:
         )
         _backend = "llama-cpp-python"
         return _backend
-    except Exception:
+    except Exception as exc:
+        import traceback as _tb
+        _err_msg = f"llama-cpp-python import FAILED: {type(exc).__name__}: {exc}\n"
+        _err_msg += f"  LD_LIBRARY_PATH={os.environ.get('LD_LIBRARY_PATH', 'not set')}\n"
+        _err_msg += f"  MODEL_PATH={MODEL_PATH}, exists={os.path.exists(MODEL_PATH)}\n"
+        _tb.print_exc()
+        # Write to /dev/kmsg for kernel log visibility
+        try:
+            with open("/dev/kmsg", "ab") as _kmsg:
+                _kmsg.write(_err_msg.encode())
+        except Exception:
+            pass
         _model = None
 
     # Try ctransformers as a fallback backend.
@@ -101,7 +137,9 @@ def _try_load_backend() -> str | None:
         )
         _backend = "ctransformers"
         return _backend
-    except Exception:
+    except Exception as exc:
+        import traceback as _tb
+        _tb.print_exc()
         _model = None
 
     _backend = None

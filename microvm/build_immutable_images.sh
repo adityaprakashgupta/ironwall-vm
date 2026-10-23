@@ -307,20 +307,46 @@ stage_guest() {
     cp "$MODEL" "$stage/opt/bayora/model.gguf"
     chmod 0444 "$stage/opt/bayora/model.gguf"
 
-    # Stage llama-cpp-python wheel and its native shared libraries so the LLM
+    # Stage llama-cpp-python wheel and ALL its dependency wheels so the LLM
     # guest can run real inference without a package index or network.
     if [ -n "$LLAMA_WHEEL" ]; then
-      local llama_stage="$stage/usr/lib/python3/site-packages"
+      local llama_stage="$stage/usr/local/lib64/python3.14/site-packages"
       mkdir -p "$llama_stage"
-      # Unpack the wheel (it's a zip) directly into site-packages.
+      # Unpack the main wheel (it's a zip) directly into site-packages.
       python3 -c "
 import zipfile, sys
 with zipfile.ZipFile('$LLAMA_WHEEL') as z:
     z.extractall('$llama_stage')
 "
+      # Also unpack any sibling wheels in the same directory (dependencies
+      # such as typing_extensions, numpy, jinja2, markupsafe, diskcache).
+      local wheel_dir
+      wheel_dir="$(dirname "$LLAMA_WHEEL")"
+      for dep_wheel in "$wheel_dir"/*.whl; do
+        [ -f "$dep_wheel" ] || continue
+        [ "$dep_wheel" = "$LLAMA_WHEEL" ] && continue
+        python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('$dep_wheel') as z:
+    z.extractall('$llama_stage')
+"
+      done
       # Stage shared library dependencies of the compiled llama backend.
       stage_libs_for "$llama_stage/llama_cpp/libllama.so" "$stage" 2>/dev/null || true
       stage_libs_for "$llama_stage/llama_cpp/_llama.so" "$stage" 2>/dev/null || true
+
+      # Explicitly copy key system libraries needed by libllama.so that
+      # stage_libs_for may miss (e.g. libstdc++.so.6, libgcc_s.so.1).
+      local sys_lib_dir="$stage/usr/lib64"
+      mkdir -p "$sys_lib_dir"
+      for sys_lib in libstdc++.so.6 libgcc_s.so.1 libgomp.so.1 libpthread.so.0; do
+        local sys_lib_path
+        # Find the library on the host system (follow symlinks)
+        sys_lib_path="$(find -L /usr/lib64 /usr/lib -name "$sys_lib" -type f 2>/dev/null | head -1)"
+        if [ -n "$sys_lib_path" ] && [ -e "$sys_lib_path" ]; then
+          cp -L "$sys_lib_path" "$sys_lib_dir/" 2>/dev/null || true
+        fi
+      done
     fi
   fi
 }

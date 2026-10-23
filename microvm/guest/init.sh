@@ -86,6 +86,12 @@ case "$ROLE" in
       while :; do sleep 3600; done
     fi
     echo "bayora-init: model sha256 verified" > /dev/kmsg 2>/dev/null || true
+    # Set LD_LIBRARY_PATH for llama-cpp-python shared libraries inside the image.
+    LLAMA_LIB_DIR=$(find /usr/lib -path '*/llama_cpp/lib' -type d 2>/dev/null | head -1)
+    if [ -n "$LLAMA_LIB_DIR" ]; then
+        export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:${LD_LIBRARY_PATH:-}"
+        echo "bayora-init: LD_LIBRARY_PATH=$LD_LIBRARY_PATH" > /dev/kmsg 2>/dev/null || true
+    fi
     echo "exec python3 /opt/bayora/llm-engine/agent.py ${PORT:-9002}" > /dev/kmsg 2>/dev/null || true
     exec python3 /opt/bayora/llm-engine/agent.py "${PORT:-9002}"
     ;;
