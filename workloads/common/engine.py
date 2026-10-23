@@ -78,6 +78,8 @@ _model = None
 _model_digest = None
 #: Which backend is active: "llama-cpp-python", "ctransformers", or None.
 _backend = None
+#: Track whether model has been loaded for cleanup.
+_model_loaded = False
 
 
 def _try_load_backend() -> str | None:
@@ -108,6 +110,7 @@ def _try_load_backend() -> str | None:
             verbose=False,
         )
         _backend = "llama-cpp-python"
+        _model_loaded = True
         return _backend
     except Exception as exc:
         import traceback as _tb
@@ -136,6 +139,7 @@ def _try_load_backend() -> str | None:
             threads=1,
         )
         _backend = "ctransformers"
+        _model_loaded = True
         return _backend
     except Exception as exc:
         import traceback as _tb
@@ -159,8 +163,10 @@ def _hash_model() -> str:
             _model_digest = _FALLBACK_MODEL_DIGEST
             return _model_digest
         h = hashlib.sha256()
-        with open(MODEL_PATH, "rb") as f:
-            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        mm = None
+        try:
+            with open(MODEL_PATH, "rb") as f:
+                mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
                 offset = 0
                 size = len(mm)
                 while offset < size:
@@ -169,8 +175,41 @@ def _hash_model() -> str:
                         break
                     h.update(chunk)
                     offset += CHUNK_SIZE
+        finally:
+            if mm is not None:
+                mm.close()
         _model_digest = h.hexdigest()
     return _model_digest
+
+
+def cleanup() -> None:
+    """Release the loaded model from memory.
+
+    Called when the LLM guest process is shutting down or when a reset is
+    needed between evaluations. Ensures the model weights are released from
+    guest RAM so they don't linger after the process exits.
+    """
+    global _model, _model_digest, _backend, _model_loaded
+
+    if _model is not None:
+        try:
+            # llama-cpp-python: the Llama object holds the model in memory.
+            # Calling del and setting to None allows Python's GC to release it.
+            del _model
+        except Exception:
+            pass
+        _model = None
+
+    if _backend == "ctransformers":
+        try:
+            del _model
+        except Exception:
+            pass
+        _model = None
+
+    _backend = None
+    _model_loaded = False
+    # Keep _model_digest — it's just a hash string, no memory impact.
 
 
 def _clip(text: str, max_tokens: int) -> str:
@@ -219,8 +258,8 @@ def respond(prompt: str, max_tokens: int) -> dict:
                 )
             output = result["choices"][0]["text"]
         except Exception as exc:
-            # Fail-closed: if inference fails, return a deterministic refusal
-            # rather than leaking partial or error state.
+            # Fail-closed: release model on error to free guest RAM.
+            cleanup()
             output = f"[llm-engine:llama-cpp] inference error: {type(exc).__name__}"
     elif backend == "ctransformers":
         # Real inference via ctransformers.
@@ -239,7 +278,8 @@ def respond(prompt: str, max_tokens: int) -> dict:
             if isinstance(output, list):
                 output = output[0].get("generated_text", str(output))
         except Exception as exc:
-            # Fail-closed: if inference fails, return a deterministic refusal.
+            # Fail-closed: release model on error to free guest RAM.
+            cleanup()
             output = f"[llm-engine:ctransformers] inference error: {type(exc).__name__}"
     else:
         # Fallback: deterministic hash-based stand-in for dev hosts.

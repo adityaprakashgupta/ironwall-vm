@@ -16,6 +16,7 @@ the evidence plane depends on.
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import sys
 
@@ -55,12 +56,31 @@ def handle(sock) -> None:
         return
 
 
+def _cleanup_and_exit(signum=None, frame=None) -> None:
+    """Release the model from memory before exiting.
+
+    Called on SIGTERM/SIGINT so the model weights are released from guest RAM
+    instead of lingering after the process exits.
+    """
+    sys.stderr.write("llm: shutting down, releasing model from memory\n")
+    try:
+        engine.cleanup()
+    except Exception:
+        pass
+    sys.exit(0)
+
+
 def serve(port: int = wire.LLM_PORT) -> None:
     listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((VMADDR_CID_ANY, port))
     listener.listen(8)
     sys.stderr.write(f"llm: listening on vsock any:{port}\n")
+
+    # Register signal handlers for clean shutdown.
+    signal.signal(signal.SIGTERM, _cleanup_and_exit)
+    signal.signal(signal.SIGINT, _cleanup_and_exit)
+
     while True:
         connection, _addr = listener.accept()
         with connection:
