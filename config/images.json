@@ -1,8 +1,8 @@
 {
   "kernel_digest": "sha256:f697969a2f005d296e8c5e2fcd0f6a4f305eb3a06b085d3930d10f1eab3a0883",
-  "red_image_digest": "sha256:e4558946181f9792692b5234408b75f101c4905038ad328dce445c6d20895aa6",
-  "blue_image_digest": "sha256:ea1a89c3729b5911fa7a4d0fa73191e6a01736afdcd2f410127760502eb3bd30",
-  "llm_image_digest": "sha256:0dd726ba7d41cd908624853ccaf40e55b19128cfe3d6175565a13d9dc94311cc",
+  "red_image_digest": "sha256:b0565f776a25653f5c68c6e81569f89bb93b03ffcb9d1441ec72693ca6728d9c",
+  "blue_image_digest": "sha256:852d44b08ecb17f558d58f14da2c5fb1ada0fea6de6b9468e1b867b92c1d88de",
+  "llm_image_digest": "sha256:ba95b2df49b6172e25a20989cba58c7bacaf6a2bc21a7187d14b5bd5a5b973d9",
   "model_digest": "sha256:74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
   "blue_policy_digest": "sha256:d7410617d2e61b54ca5e3934100ca46188918dfff64be6718bef040eab0075f4",
   "firecracker_version": "v1.17.0"

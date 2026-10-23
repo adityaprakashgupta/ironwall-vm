@@ -45,8 +45,8 @@
 #
 #   Optional:
 #     --image-size <MiB>   override the computed size for every role
-#     --llama-wheel <whl>  prebuilt llama-cpp-python wheel for LLM guest
-#                          (guests have no pip/network; must be staged at build)
+#     --llama-wheel-dir <dir>  directory with llama-cpp-python wheel + dep wheels
+#                              (guests have no pip/network; must be staged at build)
 #     --skip-golden        do not boot the llm image / take the golden snapshot
 #     --golden-only        skip building the images; regenerate the golden
 #                          snapshot from the already-built llm image and
@@ -79,7 +79,7 @@ IMAGE_SIZE_MB=""   # empty = compute per role from the staged content
 SKIP_GOLDEN=0
 GOLDEN_ONLY=0
 FIRECRACKER="${FIRECRACKER:-firecracker}"
-LLAMA_WHEEL=""     # path to prebuilt llama-cpp-python wheel for the LLM guest
+LLAMA_WHEEL_DIR=""   # directory containing llama-cpp-python wheel + dependency wheels
 # Reproducibility: stamp every file and filesystem metadata with a fixed epoch
 # so that rebuilding from the same source tree yields byte-identical images.
 # Set SOURCE_DATE_EPOCH in the environment to override; defaults to the Unix
@@ -105,7 +105,7 @@ while [ $# -gt 0 ]; do
     --skip-golden)  SKIP_GOLDEN=1; shift ;;
     --golden-only)  GOLDEN_ONLY=1; shift ;;
     --firecracker)  FIRECRACKER="$2"; shift 2 ;;
-    --llama-wheel)  LLAMA_WHEEL="$2"; shift 2 ;;
+    --llama-wheel-dir) LLAMA_WHEEL_DIR="$2"; shift 2 ;;
     -h|--help)      usage 0 ;;
     *)              echo "unknown argument: $1" >&2; usage 2 ;;
   esac
@@ -158,16 +158,13 @@ if [ ! -f "$MODEL" ]; then
 fi
 
 # The llama-cpp-python wheel provides real inference inside the LLM guest.
-# It must be prebuilt for the guest's Python version and architecture; guests
+# It must be built for the guest's Python version and architecture; guests
 # have no package index and no network, so it must be staged at build time.
-if [ -n "$LLAMA_WHEEL" ]; then
-  [ -f "$LLAMA_WHEEL" ] || die "llama-cpp-python wheel not found: $LLAMA_WHEEL"
-  case "$LLAMA_WHEEL" in
-    *.whl) ;;
-    *) die "--llama-wheel must be a .whl file, got: $LLAMA_WHEEL" ;;
-  esac
+if [ -n "$LLAMA_WHEEL_DIR" ]; then
+  [ -d "$LLAMA_WHEEL_DIR" ] || die "llama wheel directory not found: $LLAMA_WHEEL_DIR"
+  # The main wheel is found and validated later during image staging.
 else
-  echo "note: no --llama-wheel given; LLM guest will use hash-based fallback inference"
+  echo "note: no --llama-wheel-dir given; LLM guest will use hash-based fallback inference"
 fi
 
 BUSYBOX="$(command -v busybox || true)"
@@ -320,22 +317,25 @@ stage_guest() {
 
     # Stage llama-cpp-python wheel and ALL its dependency wheels so the LLM
     # guest can run real inference without a package index or network.
-    if [ -n "$LLAMA_WHEEL" ]; then
+    if [ -n "$LLAMA_WHEEL_DIR" ]; then
       local llama_stage="$stage/usr/local/lib64/python3.14/site-packages"
       mkdir -p "$llama_stage"
+      # Find the main llama-cpp-python wheel in the wheel directory.
+      local llama_wheel
+      llama_wheel="$(find "$LLAMA_WHEEL_DIR" -maxdepth 1 -name 'llama_cpp_python*.whl' | head -1)"
+      [ -n "$llama_wheel" ] || \
+        die "no llama_cpp_python wheel found in $LLAMA_WHEEL_DIR; run scripts/build_wheels.py --wheel-dir $LLAMA_WHEEL_DIR"
       # Unpack the main wheel (it's a zip) directly into site-packages.
       python3 -c "
 import zipfile, sys
-with zipfile.ZipFile('$LLAMA_WHEEL') as z:
+with zipfile.ZipFile('$llama_wheel') as z:
     z.extractall('$llama_stage')
 "
-      # Also unpack any sibling wheels in the same directory (dependencies
-      # such as typing_extensions, numpy, jinja2, markupsafe, diskcache).
-      local wheel_dir
-      wheel_dir="$(dirname "$LLAMA_WHEEL")"
-      for dep_wheel in "$wheel_dir"/*.whl; do
+      # Unpack every sibling wheel in the same directory (dependencies
+      # such as typing_extensions, diskcache, jinja2, markupsafe).
+      for dep_wheel in "$LLAMA_WHEEL_DIR"/*.whl; do
         [ -f "$dep_wheel" ] || continue
-        [ "$dep_wheel" = "$LLAMA_WHEEL" ] && continue
+        [ "$dep_wheel" = "$llama_wheel" ] && continue
         python3 -c "
 import zipfile, sys
 with zipfile.ZipFile('$dep_wheel') as z:

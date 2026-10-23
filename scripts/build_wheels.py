@@ -5,17 +5,16 @@ Build deterministic wheels for the LLM MicroVM guest.
 The LLM guest image has no package index and no network, so every Python
 dependency must be staged at image-build time.  This script repackages the
 host's installed llama-cpp-python (and its runtime dependencies) into plain,
-deterministic wheels that `microvm/build_immutable_images.sh --llama-wheel`
+deterministic wheels that `microvm/build_immutable_images.sh --llama-wheel-dir`
 can consume:
 
-    scripts/build_wheels.py \
-        --llama-wheel /path/to/llama_cpp_python-...-py3-none-linux_x86_64.whl \
-        --out microvm/wheels
+    scripts/build_wheels.py --wheel-dir microvm/wheels
 
-The main wheel must be passed explicitly because it carries compiled shared
-libraries (.so files) that are specific to the host Python version and
-architecture; dependency wheels (typing_extensions, diskcache, jinja2,
-markupsafe) are discovered automatically from the host environment.
+The main llama-cpp-python wheel is built from the host's installed package
+(compiled .so files are specific to the host Python version / architecture,
+so they must come from the host that builds the images).  Dependency wheels
+(typing_extensions, diskcache, jinja2, markupsafe) are discovered
+automatically from the host environment.
 
 Determinism
 -----------
@@ -38,9 +37,17 @@ from datetime import datetime, timezone
 #: 1980-01-01 00:00:00 UTC is the earliest representable MS-DOS date time.
 DEFAULT_EPOCH = 0
 
+#: Distribution name → import package name overrides.  Some distributions
+#: install under a different import name than their distribution name
+#: (e.g. ``llama_cpp_python`` dist provides the ``llama_cpp`` package).
+DIST_TO_IMPORT: dict[str, list[str]] = {
+    "llama_cpp_python": ["llama_cpp"],
+    "llama-cpp-python": ["llama_cpp"],
+}
+
 #: Runtime Python dependencies required by llama-cpp-python inside the guest.
 #: Discovered on the host and repackaged as sibling wheels so the image build
-#: picks them up automatically alongside --llama-wheel.
+#: picks them up automatically alongside the main llama wheel.
 DEPENDENCY_PACKAGES = ["typing_extensions", "diskcache", "jinja2", "markupsafe"]
 
 
@@ -106,26 +113,50 @@ def discover_package(package_name: str) -> tuple[str, str | None]:
     """Locate a host-installed package and its .dist-info directory.
 
     Returns (package_path_or_file, dist_info_path_or_None).  The package may be
-    a single .py module or a directory package.
+    a single .py module or a directory package.  The distribution name
+    (e.g. ``llama_cpp_python``) may differ from the import package name
+    (e.g. ``llama_cpp``), so we read ``top_level.txt`` from the dist-info to
+    find the actual importable name.
     """
     dist = importlib.metadata.distribution(package_name)
     if dist is None:
         raise SystemExit(f"package {package_name!r} is not installed on the host")
 
-    # dist.locate_file('') returns the directory containing the package's
-    # top-level importable namespace.
     base = dist.locate_file("")
-    # The package's importable name may be a subdirectory or a single file.
-    pkg_path = os.path.join(base, package_name.replace("-", "_"))
-    if not os.path.exists(pkg_path):
-        # Try single-module form (e.g. typing_extensions.py).
-        single = os.path.join(base, package_name.replace("-", "_") + ".py")
+
+    # Read the importable top-level name(s) from top_level.txt.  The
+    # distribution name can differ from the import package name
+    # (e.g. llama_cpp_python dist installs the llama_cpp package).
+    top_level: list[str] = []
+    try:
+        tl = dist.read_text("top_level.txt")
+        if tl:
+            top_level = [line.strip() for line in tl.splitlines() if line.strip()]
+    except Exception:
+        pass
+
+    if not top_level:
+        # Use explicit overrides first, then fall back to the distribution name.
+        top_level = DIST_TO_IMPORT.get(
+            package_name, [package_name.replace("-", "_")]
+        )
+
+    pkg_path: str | None = None
+    for name in top_level:
+        candidate = os.path.join(base, name)
+        if os.path.isdir(candidate):
+            pkg_path = candidate
+            break
+        single = os.path.join(base, name + ".py")
         if os.path.exists(single):
             pkg_path = single
-        else:
-            raise SystemExit(
-                f"could not locate importable {package_name!r} under {base}"
-            )
+            break
+
+    if pkg_path is None:
+        raise SystemExit(
+            f"could not locate importable package(s) {top_level} for "
+            f"{package_name!r} under {base}"
+        )
 
     # Find the .dist-info directory on disk.  dist.metadata['Name'] may use
     # different casing than the on-disk directory (e.g. "Jinja2" vs
@@ -143,6 +174,27 @@ def discover_package(package_name: str) -> tuple[str, str | None]:
     return pkg_path, dist_info
 
 
+def build_llama_wheel(out_dir: str, epoch: int) -> str:
+    """Build the llama-cpp-python wheel from the host's installed package.
+
+    The compiled shared libraries (.so files) inside llama_cpp/lib/ are
+    specific to the host Python version and architecture, so they must be
+    packaged from the host that builds the images.  The wheel filename uses
+    the linux_x86_64 platform tag because it contains compiled extensions.
+    """
+    pkg_path, dist_info = discover_package("llama_cpp_python")
+    dist = importlib.metadata.distribution("llama_cpp_python")
+    version = dist.version
+    out_name = f"llama_cpp_python-{version}-py3-none-linux_x86_64.whl"
+    out_path = os.path.join(out_dir, out_name)
+    print(f"  building main wheel {out_name} ...")
+    sources = [pkg_path]
+    if dist_info:
+        sources.append(dist_info)
+    write_deterministic_wheel(sources, out_path, epoch)
+    return out_path
+
+
 def build_dependency_wheels(out_dir: str, epoch: int) -> list[str]:
     """Build deterministic wheels for every runtime dependency."""
     built: list[str] = []
@@ -155,7 +207,7 @@ def build_dependency_wheels(out_dir: str, epoch: int) -> list[str]:
         dist = importlib.metadata.distribution(pkg)
         name = dist.metadata["Name"].replace("-", "_")
         version = dist.version
-        # Map to a plausible wheel filename tag; pure-python deps are py3-none-any.
+        # Pure-python deps use the py3-none-any tag.
         out_name = f"{name}-{version}-py3-none-any.whl"
         out_path = os.path.join(out_dir, out_name)
         print(f"  building dependency wheel {out_name} ...")
@@ -172,42 +224,32 @@ def main() -> int:
         description="Build deterministic wheels for the Bayora LLM MicroVM guest."
     )
     parser.add_argument(
-        "--llama-wheel",
-        required=True,
-        help="Path to the prebuilt llama-cpp-python wheel to stage alongside dependencies.",
-    )
-    parser.add_argument(
-        "--out",
+        "--wheel-dir",
         default="microvm/wheels",
-        help="Output directory for all wheels (default: microvm/wheels).",
+        help="Output directory for all wheels (default: microvm/wheels). "
+        "This directory is passed to build_immutable_images.sh via "
+        "--llama-wheel-dir.",
     )
     parser.add_argument(
         "--no-deps",
         action="store_true",
-        help="Only copy the main llama wheel; do not rebuild dependency wheels.",
+        help="Only build the main llama wheel; do not rebuild dependency wheels.",
     )
     args = parser.parse_args()
 
     epoch = fixed_epoch()
-    out_dir = os.path.abspath(args.out)
-    os.makedirs(out_dir, exist_ok=True)
+    wheel_dir = os.path.abspath(args.wheel_dir)
+    os.makedirs(wheel_dir, exist_ok=True)
 
-    llama_wheel = os.path.abspath(args.llama_wheel)
-    if not os.path.exists(llama_wheel):
-        raise SystemExit(f"llama wheel not found: {llama_wheel}")
-    # Copy (don't move) the main wheel so the caller's copy is preserved.
-    import shutil
+    # Build the main llama-cpp-python wheel from the host's installed package.
+    build_llama_wheel(wheel_dir, epoch)
 
-    dest = os.path.join(out_dir, os.path.basename(llama_wheel))
-    if os.path.abspath(llama_wheel) != os.path.abspath(dest):
-        shutil.copy2(llama_wheel, dest)
-    print(f"  staged main wheel: {os.path.basename(dest)}  ({os.path.getsize(dest):,} bytes)")
-
+    # Build dependency wheels.
     if not args.no_deps:
-        build_dependency_wheels(out_dir, epoch)
+        build_dependency_wheels(wheel_dir, epoch)
 
-    print(f"\nAll wheels staged in {out_dir}")
-    for f in sorted(os.listdir(out_dir)):
+    print(f"\nAll wheels staged in {wheel_dir}")
+    for f in sorted(os.listdir(wheel_dir)):
         print(f"  {f}")
     return 0
 
