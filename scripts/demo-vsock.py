@@ -53,7 +53,8 @@ def target_dir() -> str:
 
 BIN = os.path.join(target_dir(), "debug")
 BLUE_AGENT = os.path.join(ROOT, "workloads", "blue-team", "agent.py")
-LLM_AGENT = os.path.join(ROOT, "workloads", "llm-engine", "agent.py")
+LLM_AGENT = os.path.join(BIN, "bayora-llm-agent")
+LLM_MODEL = os.path.join(ROOT, "microvm", "artifacts", "model.gguf")
 RED_AGENT = os.path.join(ROOT, "workloads", "red-team", "agent.py")
 EVIDENCE_LOG = os.path.join(ROOT, "evidence", "evidence_log.ndjson")
 PUBKEY_FILE = os.path.join(ROOT, "keys", "trust_anchor.pk")
@@ -240,7 +241,20 @@ def start_signer(children: Children) -> None:
 def start_guests(children: Children) -> None:
     """Start Blue and the LLM engine, then prove each answers correctly."""
     children.spawn("blue", ["python3", BLUE_AGENT, str(BLUE_PORT)])
-    children.spawn("llm", ["python3", LLM_AGENT, str(LLM_PORT)])
+    if not os.path.exists(LLM_MODEL):
+        raise DemoError(
+            f"LLM model not found at {LLM_MODEL}; supply the GGUF weights "
+            f"at microvm/artifacts/model.gguf"
+        )
+    children.spawn(
+        "llm",
+        [
+            LLM_AGENT,
+            "--model", LLM_MODEL,
+            "--port", str(LLM_PORT),
+            "--reset-mode", "per-connection",
+        ],
+    )
 
     def blue_ready() -> bool:
         verdict = vsock_call(VSOCK_CID, BLUE_PORT, {"eval_id": "probe", "prompt": "hello"})

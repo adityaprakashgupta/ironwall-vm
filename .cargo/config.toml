@@ -1,0 +1,20 @@
+[target.x86_64-unknown-linux-gnu]
+# Statically link libstdc++ into the agent binary so the only remaining dynamic
+# system libraries are libgcc_s, libm, libc and ld-linux (which is normal and
+# expected on Linux — glibc should never be statically linked).
+#
+# llama-cpp-4 is built without the dynamic-link feature, so its llama/ggml
+# libraries are already statically linked into the binary.
+rustflags = [
+  # Switch linker to static mode for standard C++ libraries
+  "-C", "link-arg=-Wl,-Bstatic",
+  
+  # Force-static-link libstdc++ (whole-archive pulls all of it in)
+  "-C", "link-arg=-Wl,--whole-archive",
+  "-C", "link-arg=-lstdc++",
+  "-C", "link-arg=-lstdc++fs",
+  "-C", "link-arg=-Wl,--no-whole-archive",
+  
+  # Crucial: Switch back to dynamic mode so glibc, libgcc_s, etc. link dynamically
+  "-C", "link-arg=-Wl,-Bdynamic",
+]

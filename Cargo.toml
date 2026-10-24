@@ -5,6 +5,7 @@ members = [
     "crates/bayora-referee",
     "crates/bayora-signer",
     "crates/bayora-verifier",
+    "crates/bayora-llm-engine",
 ]
 # `cargo fuzz` needs a nightly toolchain and its own lockfile; keep it out of
 # the stable workspace build.
@@ -18,6 +19,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 bayora-common = { path = "crates/bayora-common" }
+bayora-llm-engine = { path = "crates/bayora-llm-engine" }
 
 anyhow = "1"
 async-trait = "0.1"

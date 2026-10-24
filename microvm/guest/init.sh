@@ -65,10 +65,12 @@ case "$ROLE" in
     exec python3 /opt/bayora/blue-team/agent.py "${PORT:-9001}"
     ;;
   llm)
-    # The llm guest carries the model weights, and must be told which weights
-    # to expect: without a digest on the command line it refuses to serve at
-    # all, so there is no path to running unverified weights. The digest comes
-    # from config/images.json (what the build measured) via boot_enclave.sh.
+    # The llm guest carries the model weights and runs the Rust inference
+    # engine (bayora-llm-agent, backed by llama-cpp-4). It must be told which
+    # weights to expect: without a digest on the command line it refuses to
+    # serve at all, so there is no path to running unverified weights. The
+    # digest comes from config/images.json (what the build measured) via
+    # boot_enclave.sh.
     if [ -z "$MODEL_SHA" ]; then
       echo "bayora-init: llm role requires bayora.model_sha256, refusing to serve" > /dev/kmsg 2>/dev/null || true
       while :; do sleep 3600; done
@@ -86,14 +88,8 @@ case "$ROLE" in
       while :; do sleep 3600; done
     fi
     echo "bayora-init: model sha256 verified" > /dev/kmsg 2>/dev/null || true
-    # Set LD_LIBRARY_PATH for llama-cpp-python shared libraries inside the image.
-    LLAMA_LIB_DIR=$(find /usr/lib -path '*/llama_cpp/lib' -type d 2>/dev/null | head -1)
-    if [ -n "$LLAMA_LIB_DIR" ]; then
-        export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:${LD_LIBRARY_PATH:-}"
-        echo "bayora-init: LD_LIBRARY_PATH=$LD_LIBRARY_PATH" > /dev/kmsg 2>/dev/null || true
-    fi
-    echo "exec python3 /opt/bayora/llm-engine/agent.py ${PORT:-9002}" > /dev/kmsg 2>/dev/null || true
-    exec python3 /opt/bayora/llm-engine/agent.py "${PORT:-9002}"
+    echo "exec bayora-llm-agent --model /opt/bayora/model.gguf --port ${PORT:-9002} --reset-mode per-connection" > /dev/kmsg 2>/dev/null || true
+    exec bayora-llm-agent --model /opt/bayora/model.gguf --port "${PORT:-9002}" --reset-mode per-connection
     ;;
   *)
     echo "bayora-init: no or unknown bayora.role ('$ROLE'); debug shell" > /dev/kmsg 2>/dev/null || true

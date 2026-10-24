@@ -296,69 +296,67 @@ stage_guest() {
   rm -rf "$stage"
   mkdir -p "$stage/opt/bayora" "$stage/run/bayora" "$stage/var/log/bayora"
 
-  # The base userspace first, then the payload on top of it.
-  stage_base "$stage"
+  if [ "$role" = llm ]; then
+    # Minimal userspace for the llm guest: busybox only. No Python, no host
+    # stdlib, no host system libraries — the Rust agent is self-contained.
+    # This is what makes the llm image digest reproducible across build machines.
+    mkdir -p "$stage/bin" "$stage/usr/bin" "$stage/usr/lib64" "$stage/lib64" \
+             "$stage/etc" "$stage/proc" "$stage/sys" "$stage/dev" \
+             "$stage/tmp" "$stage/run" "$stage/var/log" "$stage/root"
+    cp "$BUSYBOX" "$stage/bin/busybox"
+    chmod 0755 "$stage/bin/busybox"
+    local applet
+    for applet in sh ash mount umount mkdir sed sleep seq echo cat ls grep \
+                  sha256sum cut head basename dirname env test true false; do
+      ln -sf busybox "$stage/bin/$applet"
+    done
+    printf 'root:x:0:0:root:/root:/bin/sh\n' > "$stage/etc/passwd"
+    printf 'root:x:0:\n' > "$stage/etc/group"
+  else
+    # The base userspace (busybox + Python + stdlib) for red and blue roles.
+    stage_base "$stage"
+  fi
 
   # The guest payload: one agent plus the shared guest library. Anything not
   # copied here simply does not exist inside the VM.
   cp -r "$ROOT/workloads/common" "$stage/opt/bayora/common"
-  cp -r "$ROOT/workloads/$dir" "$stage/opt/bayora/$dir"
   cp "$MICROVM/guest/init.sh" "$stage/opt/bayora/init.sh"
   chmod 0755 "$stage/opt/bayora/init.sh"
 
   find "$stage/opt" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   find "$stage/opt" -name '*.pyc' -delete 2>/dev/null || true
 
-  # The llm guest carries the model weights; init.sh verifies their digest
-  # against the kernel command line before the agent binds its socket.
+  # The llm guest carries the Rust inference engine and the model weights.
   if [ "$role" = llm ]; then
-    cp "$MODEL" "$stage/opt/bayora/model.gguf"
-    chmod 0444 "$stage/opt/bayora/model.gguf"
+    # Copy the pre-built static-ish Rust agent binary into the image.
+    cp "$LLM_AGENT_BIN" "$stage/opt/bayora/bayora-llm-agent"
+    chmod 0755 "$stage/opt/bayora/bayora-llm-agent"
 
-    # Stage llama-cpp-python wheel and ALL its dependency wheels so the LLM
-    # guest can run real inference without a package index or network.
-    if [ -n "$LLAMA_WHEEL_DIR" ]; then
-      local llama_stage="$stage/usr/local/lib64/python3.14/site-packages"
-      mkdir -p "$llama_stage"
-      # Find the main llama-cpp-python wheel in the wheel directory.
-      local llama_wheel
-      llama_wheel="$(find "$LLAMA_WHEEL_DIR" -maxdepth 1 -name 'llama_cpp_python*.whl' | head -1)"
-      [ -n "$llama_wheel" ] || \
-        die "no llama_cpp_python wheel found in $LLAMA_WHEEL_DIR; run scripts/build_wheels.py --wheel-dir $LLAMA_WHEEL_DIR"
-      # Unpack the main wheel (it's a zip) directly into site-packages.
-      python3 -c "
-import zipfile, sys
-with zipfile.ZipFile('$llama_wheel') as z:
-    z.extractall('$llama_stage')
-"
-      # Unpack every sibling wheel in the same directory (dependencies
-      # such as typing_extensions, diskcache, jinja2, markupsafe).
-      for dep_wheel in "$LLAMA_WHEEL_DIR"/*.whl; do
-        [ -f "$dep_wheel" ] || continue
-        [ "$dep_wheel" = "$llama_wheel" ] && continue
-        python3 -c "
-import zipfile, sys
-with zipfile.ZipFile('$dep_wheel') as z:
-    z.extractall('$llama_stage')
-"
-      done
-      # Stage shared library dependencies of the compiled llama backend.
-      stage_libs_for "$llama_stage/llama_cpp/libllama.so" "$stage" 2>/dev/null || true
-      stage_libs_for "$llama_stage/llama_cpp/_llama.so" "$stage" 2>/dev/null || true
-
-      # Explicitly copy key system libraries needed by libllama.so that
-      # stage_libs_for may miss (e.g. libstdc++.so.6, libgcc_s.so.1).
-      local sys_lib_dir="$stage/usr/lib64"
-      mkdir -p "$sys_lib_dir"
-      for sys_lib in libstdc++.so.6 libgcc_s.so.1 libgomp.so.1 libpthread.so.0; do
-        local sys_lib_path
-        # Find the library on the host system (follow symlinks)
-        sys_lib_path="$(find -L /usr/lib64 /usr/lib -name "$sys_lib" -type f 2>/dev/null | head -1)"
-        if [ -n "$sys_lib_path" ] && [ -e "$sys_lib_path" ]; then
-          cp -L "$sys_lib_path" "$sys_lib_dir/" 2>/dev/null || true
+    # Stage the llama.cpp shared libraries the binary links against, so the
+    # guest's dynamic loader can resolve them at runtime. These are placed in
+    # /usr/lib64 which is on the default library search path.
+    if [ -n "$LLM_LIB_DIR" ] && [ -d "$LLM_LIB_DIR" ]; then
+      mkdir -p "$stage/usr/lib64"
+      for lib in libllama-common.so.0 libllama.so.0; do
+        if [ -e "$LLM_LIB_DIR/$lib" ]; then
+          cp -L "$LLM_LIB_DIR/$lib" "$stage/usr/lib64/"
+          chmod 0755 "$stage/usr/lib64/$lib"
         fi
       done
+      # Create symlinks for the soname chain.
+      ( cd "$stage/usr/lib64" && \
+        [ -e libllama-common.so.0 ] && ln -sf libllama-common.so.0 libllama-common.so && \
+        [ -e libllama.so.0 ] && ln -sf libllama.so.0 libllama.so ) 2>/dev/null || true
     fi
+
+    # Stage the model weights; init.sh verifies their digest before serving.
+    cp "$MODEL" "$stage/opt/bayora/model.gguf"
+    chmod 0444 "$stage/opt/bayora/model.gguf"
+  else
+    # Red and blue roles still run Python agents.
+    cp -r "$ROOT/workloads/$dir" "$stage/opt/bayora/$dir"
+    find "$stage/opt/bayora/$dir" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$stage/opt/bayora/$dir" -name '*.pyc' -delete 2>/dev/null || true
   fi
 }
 
@@ -429,7 +427,25 @@ self_test_image() {
   fi
 
   local err="$WORK/selftest-$role.err"
-  if chroot "$mnt" /usr/bin/python3 - "$dir" 2>"$err" <<'PY'; then
+  if [ "$role" = llm ]; then
+    # The llm image carries a Rust binary, not a Python module. Check that the
+    # binary exists, is executable, and links against the staged shared libs.
+    if [ -x "$mnt/opt/bayora/bayora-llm-agent" ] && [ -f "$mnt/opt/bayora/model.gguf" ]; then
+      # Verify the binary can at least start (it will exit since no --model
+      # flag is given, but that confirms the dynamic loader resolved it).
+      if chroot "$mnt" /opt/bayora/bayora-llm-agent 2>"$err"; then
+        ok=1
+      else
+        # --help or missing --model may exit non-zero; check the error is about
+        # missing arguments, not about missing shared libraries.
+        if grep -q "error while loading shared libraries\|No such file\|model file not found" "$err" 2>/dev/null; then
+          ok=0
+        else
+          ok=1
+        fi
+      fi
+    fi
+  elif chroot "$mnt" /usr/bin/python3 - "$dir" 2>"$err" <<'PY'; then
 import importlib.util, sys
 dir = sys.argv[1]
 spec = importlib.util.spec_from_file_location("agent", f"/opt/bayora/{dir}/agent.py")
@@ -443,6 +459,10 @@ assert hasattr(agent, "main") or hasattr(agent, "serve"), \
 sys.path.insert(0, "/opt/bayora")
 import common.wire, common.policy  # noqa: F401
 print(f"{dir} payload ok")
+PY
+  then
+    ok=1
+  fi
 PY
     ok=1
   fi
@@ -474,6 +494,30 @@ cleanup() {
   # (fc-llm.log, serial) can be inspected after a failure.
 }
 trap cleanup EXIT
+
+# --- build the Rust LLM agent (llama-cpp-4 backed) -----------------------
+# This produces a single static-ish binary plus shared libraries that we stage
+# into the llm guest image. It replaces the old Python + llama-cpp-python +
+# host-system-library approach, making the image digest reproducible across
+# build machines.
+LLM_AGENT_BIN="$ROOT/target/release/bayora-llm-agent"
+LLM_LIB_DIR=""
+if [ "$GOLDEN_ONLY" = 0 ]; then
+  echo "==> building bayora-llm-agent (release)"
+  cargo build --release --manifest-path "$ROOT/crates/bayora-llm-engine/Cargo.toml" \
+    || die "cargo build for bayora-llm-engine failed"
+  [ -x "$LLM_AGENT_BIN" ] || die "bayora-llm-agent binary not found at $LLM_AGENT_BIN"
+  echo "    $LLM_AGENT_BIN"
+
+  # Locate the llama.cpp shared libraries produced by llama-cpp-sys-4's cmake
+  # build so we can stage them into the guest image.
+  LLM_LIB_DIR="$(find "$ROOT/target/llama-cmake-cache" -maxdepth 1 -type d -name 'lib64' 2>/dev/null | head -1)"
+  if [ -z "$LLM_LIB_DIR" ]; then
+    die "could not find llama.cpp shared libraries in target/llama-cmake-cache; \
+          did the bayora-llm-engine build succeed?"
+  fi
+  echo "    llama libs: $LLM_LIB_DIR"
+fi
 
 if [ "$GOLDEN_ONLY" = 0 ]; then
   for role in red blue llm; do

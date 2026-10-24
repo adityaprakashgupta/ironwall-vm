@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 bayora-common.workspace = true
+bayora-llm-engine.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true

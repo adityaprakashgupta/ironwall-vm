@@ -59,8 +59,8 @@ pub use snapshot_manager::{
     ResetReport,
 };
 pub use transport::{
-    BlueRequest, BlueVerdict, Decision, LlmRequest, LlmResponse, StubTransport, TransportError,
-    WorkloadTransport,
+    BlueRequest, BlueVerdict, Decision, LlmEngineResetManager, LlmEngineTransport, LlmRequest,
+    LlmResponse, StubTransport, TransportError, WorkloadTransport,
 };
 #[cfg(target_os = "linux")]
 pub use transport::VsockTransport;

@@ -11,10 +11,13 @@ use bayora_referee::metrics::Metrics;
 use bayora_referee::policy_engine::PolicyEngine;
 use bayora_referee::referee::RefereeState;
 use bayora_referee::snapshot_manager::{LogicalKvResetManager, NoopResetManager, ResetManager};
-use bayora_referee::transport::{StubTransport, WorkloadTransport};
+use bayora_referee::transport::{
+    LlmEngineResetManager, LlmEngineTransport, StubTransport, WorkloadTransport,
+};
 use bayora_referee::trust_anchor::{CapabilityIssuer, IsolatedSocketSigner, SignerEndpoint, TrustAnchorSigner};
 use bayora_common::capability::IssuerPublicKey;
 use bayora_common::manifest::ImageRegistry;
+use bayora_llm_engine::LlmEngine;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,6 +83,11 @@ struct Args {
     llm_cid: u32,
     #[arg(long, default_value_t = 9002)]
     llm_port: u32,
+
+    /// Path to the GGUF model file (used with `--transport llm-engine`).
+    /// This is the only runtime artifact the LLM engine needs.
+    #[arg(long)]
+    llm_model: Option<PathBuf>,
 
     /// Workload reset: `noop` (demo), `snapshot` (Firecracker) or `kv` (llama.cpp).
     #[arg(long, default_value = "noop")]
@@ -235,8 +243,30 @@ async fn main() -> anyhow::Result<()> {
     #[cfg_attr(not(unix), allow(unused_variables))]
     let llm_uds = args.runtime_dir.join("llm.vsock");
 
+    // The in-process LLM engine is shared between `LlmEngineTransport`
+    // (--transport llm-engine) and `LlmEngineResetManager` (--reset llm-engine).
+    let llm_engine: Option<Arc<tokio::sync::Mutex<LlmEngine>>> =
+        if args.transport == "llm-engine" || args.reset == "llm-engine" {
+            let model_path = args.llm_model.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--llm-model is required when --transport llm-engine or --reset llm-engine is used"
+                )
+            })?;
+            let mut engine = LlmEngine::new()?;
+            engine.load(model_path, 512, 1)?;
+            Some(Arc::new(tokio::sync::Mutex::new(engine)))
+        } else {
+            None
+        };
+
     let transport: Arc<dyn WorkloadTransport> = match args.transport.as_str() {
         "stub" => Arc::new(StubTransport::default()),
+        "llm-engine" => {
+            let engine = llm_engine
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("llm engine not initialised"))?;
+            Arc::new(LlmEngineTransport::new(Arc::clone(engine)))
+        }
         #[cfg(target_os = "linux")]
         "vsock" => Arc::new(bayora_referee::VsockTransport {
             blue_cid: args.blue_cid,
@@ -261,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
         "firecracker" => {
             anyhow::bail!("--transport firecracker requires Linux (AF_UNIX vsock mediation)")
         }
-        other => anyhow::bail!("unknown --transport {other:?} (expected stub|vsock|firecracker)"),
+        other => anyhow::bail!("unknown --transport {other:?} (expected stub|vsock|firecracker|llm-engine)"),
     };
     let reset: Arc<dyn ResetManager> = match args.reset.as_str() {
         "noop" => Arc::new(NoopResetManager::new(policy.reset_policy())),
@@ -284,7 +314,13 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(manager)
         }
         "kv" => Arc::new(LogicalKvResetManager::new(&args.llama_url, 0)),
-        other => anyhow::bail!("unknown --reset {other:?} (expected noop|snapshot|kv)"),
+        "llm-engine" => {
+            let engine = llm_engine
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("llm engine not initialised"))?;
+            Arc::new(LlmEngineResetManager::new(Arc::clone(engine)))
+        }
+        other => anyhow::bail!("unknown --reset {other:?} (expected noop|snapshot|kv|llm-engine)"),
     };
     tracing::info!(transport = %transport.describe(), reset = %reset.describe(), "downstream configured");
 

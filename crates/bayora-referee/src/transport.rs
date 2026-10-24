@@ -428,6 +428,102 @@ impl WorkloadTransport for FirecrackerUdsTransport {
     }
 }
 
+/// In-process LLM transport backed by [`bayora_llm_engine::LlmEngine`].
+///
+/// Used with `--transport llm-engine` for development/CI without Firecracker.
+/// The engine holds a real GGUF model in memory, so this exercises the exact
+/// inference path (`LlmEngine::infer`) that the MicroVM guest agent runs.
+///
+/// `ask_blue` always returns `Allow`/`pass` so that every prompt reaches the
+/// LLM — Blue-team staging is a separate guest in production and is exercised
+/// with `--transport vsock`/`--transport firecracker` instead.
+#[derive(Debug, Clone)]
+pub struct LlmEngineTransport {
+    engine: std::sync::Arc<tokio::sync::Mutex<bayora_llm_engine::LlmEngine>>,
+}
+
+impl LlmEngineTransport {
+    pub fn new(engine: std::sync::Arc<tokio::sync::Mutex<bayora_llm_engine::LlmEngine>>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkloadTransport for LlmEngineTransport {
+    async fn ask_blue(
+        &self,
+        _request: &BlueRequest,
+    ) -> Result<BlueVerdict, TransportError> {
+        // In engine mode Blue is not a separate guest; pass everything through
+        // so the LLM path can be tested end to end.
+        Ok(BlueVerdict {
+            decision: Decision::Allow,
+            stage: "pass".into(),
+            reason: "engine mode: blue simulation (pass)".into(),
+            response: String::new(),
+        })
+    }
+
+    async fn ask_llm(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<LlmResponse, TransportError> {
+        let mut engine = self.engine.lock().await;
+        let output = engine
+            .infer(&request.prompt, request.max_tokens)
+            .map_err(|e| TransportError::Io(e.to_string()))?;
+        Ok(LlmResponse { output })
+    }
+
+    fn describe(&self) -> String {
+        "llm-engine (in-process bayora-llm-engine / llama-cpp-4)".into()
+    }
+}
+
+/// [`ResetManager`] that resets the in-process LLM engine between evaluations.
+///
+/// Shares the same [`bayora_llm_engine::LlmEngine`] as [`LlmEngineTransport`],
+/// so `reset()` clears the KV cache that the transport's `ask_llm` will reuse.
+/// This is the model tier of the Resettable pillar when running without
+/// Firecracker snapshots.
+#[derive(Debug, Clone)]
+pub struct LlmEngineResetManager {
+    engine: std::sync::Arc<tokio::sync::Mutex<bayora_llm_engine::LlmEngine>>,
+}
+
+impl LlmEngineResetManager {
+    pub fn new(
+        engine: std::sync::Arc<tokio::sync::Mutex<bayora_llm_engine::LlmEngine>>,
+    ) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::snapshot_manager::ResetManager for LlmEngineResetManager {
+    async fn reset(&self) -> Result<crate::snapshot_manager::ResetReport, crate::snapshot_manager::ResetError> {
+        let started = std::time::Instant::now();
+        let mut engine = self.engine.lock().await;
+        engine.reset().map_err(|e| {
+            crate::snapshot_manager::ResetError::Io(e.to_string())
+        })?;
+        Ok(crate::snapshot_manager::ResetReport {
+            policy: bayora_common::policy::ResetPolicy::Snapshot,
+            duration_us: started.elapsed().as_micros() as u64,
+            detail: "llm engine context reset (KV cache cleared)".into(),
+            simulated: false,
+        })
+    }
+
+    fn policy(&self) -> bayora_common::policy::ResetPolicy {
+        bayora_common::policy::ResetPolicy::Snapshot
+    }
+
+    fn describe(&self) -> String {
+        "llm-engine context reset".into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
