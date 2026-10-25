@@ -211,7 +211,14 @@ mkdir -p "$IMAGES" "$SNAPSHOTS"
 # so the guest's dynamic loader finds each library where it expects it.
 stage_libs_for() {
   local binary="$1" stage="$2" lib
-  ldd "$binary" 2>/dev/null | awk '/=>/ {print $3} /^\// {print $NF}' | while read -r lib; do
+  # ldd lines look like:
+  #   libfoo.so.1 => /lib64/libfoo.so.1 (0x...)
+  #   /lib64/ld-linux-x86-64.so.2 (0x...)
+  # The first form yields the resolved path in field 3; the second (ld-linux
+  # itself) starts with / and its path is field 1.  Print whichever field is a
+  # real filesystem path.
+  ldd "$binary" 2>/dev/null | sed 's/^[[:space:]]*//' \
+    | awk '/=>/ {print $3} /^\// && !/=>/ {print $1}' | while read -r lib; do
     [ -n "$lib" ] && [ -e "$lib" ] || continue
     mkdir -p "$stage$(dirname "$lib")"
     cp -L "$lib" "$stage$lib" 2>/dev/null || true
@@ -234,7 +241,7 @@ stage_base() {
   chmod 0755 "$stage/bin/busybox"
   local applet
   for applet in sh ash mount umount mkdir sed sleep seq echo cat ls grep \
-                sha256sum cut head basename dirname env test true false; do
+                sha256sum cut head basename dirname env test true false uname; do
     ln -sf busybox "$stage/bin/$applet"
   done
 
@@ -307,7 +314,7 @@ stage_guest() {
     chmod 0755 "$stage/bin/busybox"
     local applet
     for applet in sh ash mount umount mkdir sed sleep seq echo cat ls grep \
-                  sha256sum cut head basename dirname env test true false; do
+                  sha256sum cut head basename dirname env test true false uname; do
       ln -sf busybox "$stage/bin/$applet"
     done
     printf 'root:x:0:0:root:/root:/bin/sh\n' > "$stage/etc/passwd"
@@ -352,6 +359,11 @@ stage_guest() {
     # Stage the model weights; init.sh verifies their digest before serving.
     cp "$MODEL" "$stage/opt/bayora/model.gguf"
     chmod 0444 "$stage/opt/bayora/model.gguf"
+
+    # Stage the system shared libraries the static-ish Rust agent needs at
+    # runtime: the dynamic loader (ld-linux), libc, libm, libgcc_s. The llm
+    # guest has no package manager, so these must be copied in at build time.
+    stage_libs_for "$LLM_AGENT_BIN" "$stage"
   else
     # Red and blue roles still run Python agents.
     cp -r "$ROOT/workloads/$dir" "$stage/opt/bayora/$dir"
@@ -460,10 +472,6 @@ sys.path.insert(0, "/opt/bayora")
 import common.wire, common.policy  # noqa: F401
 print(f"{dir} payload ok")
 PY
-  then
-    ok=1
-  fi
-PY
     ok=1
   fi
 
@@ -511,7 +519,7 @@ if [ "$GOLDEN_ONLY" = 0 ]; then
 
   # Locate the llama.cpp shared libraries produced by llama-cpp-sys-4's cmake
   # build so we can stage them into the guest image.
-  LLM_LIB_DIR="$(find "$ROOT/target/llama-cmake-cache" -maxdepth 1 -type d -name 'lib64' 2>/dev/null | head -1)"
+  LLM_LIB_DIR="$(find "$ROOT/target/llama-cmake-cache" -type d -name 'lib64' 2>/dev/null | head -1)"
   if [ -z "$LLM_LIB_DIR" ]; then
     die "could not find llama.cpp shared libraries in target/llama-cmake-cache; \
           did the bayora-llm-engine build succeed?"
@@ -560,7 +568,7 @@ create_golden_snapshot() {
     { "drive_id": "rootfs", "path_on_host": "$IMAGES/llm.ext4",
       "is_root_device": true, "is_read_only": true }
   ],
-  "machine-config": { "vcpu_count": 1, "mem_size_mib": 256, "smt": false },
+  "machine-config": { "vcpu_count": 1, "mem_size_mib": 2048, "smt": false },
   "vsock": { "guest_cid": 5, "uds_path": "$WORK/llm.vsock" },
   "logger": { "log_path": "$WORK/fc-llm.log", "level": "Warning" }
 }

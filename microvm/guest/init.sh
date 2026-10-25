@@ -19,7 +19,7 @@ set -eu
 
 # The image ships busybox applets in /bin and python3 in /usr/bin; nothing
 # else. PATH must be set before the first external command.
-PATH=/usr/bin:/bin
+PATH=/usr/bin:/bin:/opt/bayora
 export PATH
 
 # /proc must be mounted before /proc/cmdline can be read -- the original
