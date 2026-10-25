@@ -58,7 +58,11 @@ case "$ROLE" in
     ls -l /dev/vdb > /dev/kmsg 2>&1 || true
     ls -l /run/bayora > /dev/kmsg 2>&1 || true
     echo "exec python3 /opt/bayora/red-team/agent.py" > /dev/kmsg 2>/dev/null || true
-    exec python3 /opt/bayora/red-team/agent.py
+    python3 /opt/bayora/red-team/agent.py
+    # Red is a one-shot client: when it finishes, keep PID 1 alive so the
+    # kernel does not panic on init exit. The VM is torn down by the Referee
+    # after the evaluation completes.
+    while :; do sleep 3600; done
     ;;
   blue)
     echo "exec python3 /opt/bayora/blue-team/agent.py ${PORT:-9001}" > /dev/kmsg 2>/dev/null || true
