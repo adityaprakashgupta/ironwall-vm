@@ -1,18 +1,21 @@
 //! Firecracker MicroVM management.
-//! Replaces microvm/boot_enclave.sh — boots red, blue, and llm guests,
-//! manages vsock sockets, and handles the Red task disk.
+//! Directly manages Firecracker processes instead of shelling out to
+//! boot_enclave.sh, giving full control over the boot lifecycle.
 
 use crate::trace::{Trace, TraceStage};
 use anyhow::{anyhow, Result};
 use serde_json::json;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 /// Boot the Firecracker MicroVMs (red, blue, llm).
 ///
-/// Returns when blue and red vsock sockets are available. The llm VM is
-/// owned by the Referee (via --reset snapshot) and is not booted here.
+/// Directly starts Firecracker processes for blue and red VMs. The llm VM
+/// is owned by the Referee (via --reset snapshot) and is not booted here.
 pub fn boot_enclave(
     trace: &Trace,
     root: &Path,
@@ -26,7 +29,7 @@ pub fn boot_enclave(
 ) -> Result<BootResult> {
     trace.info(
         TraceStage::MicroVMBoot,
-        "booting Firecracker MicroVMs",
+        "booting Firecracker MicroVMs directly",
         Default::default(),
     );
 
@@ -61,6 +64,9 @@ pub fn boot_enclave(
         &model_sha,
     )?;
 
+    // Wait for blue to be ready
+    wait_for_vsock(trace, runtime_dir.join("blue.vsock"), "blue")?;
+
     // Boot red VM (CID 3) with task disk
     boot_single_vm(
         trace,
@@ -77,15 +83,8 @@ pub fn boot_enclave(
         &model_sha,
     )?;
 
-    // Wait for both vsock sockets
-    for _ in 0..240 {
-        let blue_ok = runtime_dir.join("blue.vsock").exists();
-        let red_ok = runtime_dir.join("red.vsock").exists();
-        if blue_ok && red_ok {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
+    // Wait for red to be ready
+    wait_for_vsock(trace, runtime_dir.join("red.vsock"), "red")?;
 
     let result = BootResult {
         blue_vsock: runtime_dir.join("blue.vsock"),
@@ -172,11 +171,11 @@ fn boot_single_vm(
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
     // Start Firecracker
-    let _ = Command::new(firecracker_bin)
+    let mut fc = Command::new(firecracker_bin)
         .arg("--api-sock").arg(&api_sock)
         .arg("--config-file").arg(&config_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()?;
 
     // Wait for API socket
@@ -184,10 +183,10 @@ fn boot_single_vm(
         if api_sock.exists() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
 
-    // Start the instance
+    // Start the instance via Firecracker API
     let client = reqwest::blocking::Client::new();
     client
         .put(format!("http://localhost/actions"))
@@ -200,8 +199,11 @@ fn boot_single_vm(
         if vsock_uds.exists() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
+
+    // Keep the Firecracker process running (don't kill it)
+    // We intentionally don't call fc.wait() - the process runs in background
 
     trace.info(
         TraceStage::MicroVMBoot,
@@ -217,6 +219,27 @@ fn boot_single_vm(
     );
 
     Ok(())
+}
+
+/// Wait for a vsock socket to appear.
+fn wait_for_vsock(trace: &Trace, sock_path: PathBuf, role: &str) -> Result<()> {
+    for _ in 0..200 {
+        if sock_path.exists() {
+            trace.success(
+                TraceStage::MicroVMBoot,
+                &format!("{role} vsock ready"),
+                {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("role".into(), role.into());
+                    m.insert("socket".into(), sock_path.display().to_string().into());
+                    m
+                },
+            );
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(anyhow!("{role} vsock socket never appeared at {}", sock_path.display()))
 }
 
 /// Result of booting the enclave.
@@ -235,7 +258,6 @@ fn get_model_digest(root: &Path) -> Result<String> {
     let model_digest = images["model_digest"]
         .as_str()
         .ok_or_else(|| anyhow!("model_digest not found in images.json"))?;
-    // Strip "sha256:" prefix
     Ok(model_digest.strip_prefix("sha256:").unwrap_or(model_digest).to_string())
 }
 

@@ -23,7 +23,7 @@ pub mod dashboard;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_json;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// Configuration for the orchestrator.
@@ -127,7 +127,11 @@ impl Orchestrator {
         })
     }
 
-    /// Run the full lifecycle: download → build → boot → evaluate → seal → verify.
+    /// Run the full lifecycle: download -> build -> boot -> evaluate -> seal -> verify.
+    ///
+    /// Firecracker MicroVMs are booted first, then evaluations are created via
+    /// the Referee HTTP API and turns are run through the same API (Referee
+    /// internally routes Blue to LLM with snapshot reset between turns).
     pub async fn run_full_lifecycle(&mut self) -> Result<()> {
         self.trace.info(trace::TraceStage::ArtifactDownload, "starting full lifecycle", Default::default());
 
@@ -143,18 +147,19 @@ impl Orchestrator {
         // Step 4: Start Referee
         self.start_referee()?;
 
-        // Step 5: Boot enclave FIRST (VMs must be running before evaluations are created,
-        // otherwise capability nonces expire during the ~60s VM boot time)
+        // Step 5: Boot Firecracker MicroVMs (blue + red; Referee owns llm)
+        self.boot_enclave(&[])?;
+
+        // Step 6: Create evaluations via Referee API (Red team submits prompts)
         let evaluations = self.create_evaluations()?;
-        self.boot_enclave(&evaluations)?;
 
-        // Step 6: Wait for completion
-        self.wait_for_completion(&evaluations)?;
+        // Step 7: Run turns via HTTP API (Referee routes Blue → LLM internally)
+        self.run_turns_http(&evaluations)?;
 
-        // Step 7: Seal batch
+        // Step 8: Seal batch
         self.seal_batch()?;
 
-        // Step 8: Verify
+        // Step 9: Verify
         let verified = self.run_verifier()?;
 
         self.trace.success(
@@ -173,6 +178,65 @@ impl Orchestrator {
         } else {
             Err(anyhow!("verifier returned INVALID"))
         }
+    }
+
+    /// Run turns via Referee HTTP API.
+    ///
+    /// Each evaluation gets one turn sent via POST /v1/evaluations/{id}/turns.
+    /// The Referee internally routes through Blue VM to LLM VM with snapshot
+    /// reset between turns.
+    fn run_turns_http(&self, evaluations: &[EvaluationRef]) -> Result<()> {
+        self.trace.info(trace::TraceStage::Evaluation, "running turns via Referee HTTP API", Default::default());
+
+        let client = reqwest::blocking::Client::new();
+
+        for eval in evaluations {
+            self.trace.info(
+                trace::TraceStage::Evaluation,
+                &format!("running turn for {}", &eval.eval_id[..8]),
+                {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("eval_id".into(), eval.eval_id.clone().into());
+                    m.insert("prompt".into(), eval.prompt.clone().into());
+                    m
+                },
+            );
+
+            let body = json!({
+                "capability": eval.capability,
+                "turn": 1,
+                "prompt": eval.prompt
+            });
+
+            let resp: serde_json::Value = client
+                .post(format!("http://{}/v1/evaluations/{}/turns", self.config.referee_listen, eval.eval_id))
+                .json(&body)
+                .send()?
+                .json()?;
+
+            let path = resp.get("telemetry")
+                .and_then(|t| t.get("path"))
+                .and_then(|p| p.as_str())
+                .unwrap_or("?");
+            let held_us = resp.get("telemetry")
+                .and_then(|t| t.get("held_us"))
+                .and_then(|h| h.as_u64())
+                .unwrap_or(0);
+
+            self.trace.success(
+                trace::TraceStage::Evaluation,
+                &format!("turn completed: {}", &eval.eval_id[..8]),
+                {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("eval_id".into(), eval.eval_id.clone().into());
+                    m.insert("path".into(), path.into());
+                    m.insert("held_us".into(), held_us.into());
+                    m
+                },
+            );
+        }
+
+        Ok(())
     }
 
     fn verify_artifacts(&self) -> Result<()> {
