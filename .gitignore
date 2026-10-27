@@ -21,3 +21,5 @@ __pycache__/
 *.pyc
 .tmp/
 microvm/wheels/
+evidence/orchestrator.trace.jsonl
+evidence/red-task.json
