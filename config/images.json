@@ -1,8 +1,8 @@
 {
   "kernel_digest": "sha256:f697969a2f005d296e8c5e2fcd0f6a4f305eb3a06b085d3930d10f1eab3a0883",
-  "red_image_digest": "sha256:6b2c2bfad19b41663f3ae60721fecc4a2b84b0dc79d273e41f18bfdfda4db3e8",
-  "blue_image_digest": "sha256:5419b3589d50fd5775f3a24ce0e9a4fbaceb2187847b8de5bd307f846c6aca40",
-  "llm_image_digest": "sha256:d2eaaac866a7d8908a16dd1579080ee29868b0e6fadf8a131701a82c77c1d81d",
+  "red_image_digest": "sha256:cadac3ef83ddf4780b2a2aa8a8683de0391be10ad08bf10f040702bb0ce5e159",
+  "blue_image_digest": "sha256:751653914e0faee8de7c4ff44be0211bd0fd4cf09d62a7d088546327f252f42f",
+  "llm_image_digest": "sha256:5ca64c03b396069d226745b26c0922a65b36a3b266aadc561bbdd222b21fcd5e",
   "model_digest": "sha256:74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
   "blue_policy_digest": "sha256:d7410617d2e61b54ca5e3934100ca46188918dfff64be6718bef040eab0075f4",
   "firecracker_version": "v1.17.0"

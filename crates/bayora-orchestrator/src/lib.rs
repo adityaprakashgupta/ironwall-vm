@@ -23,6 +23,7 @@ pub mod dashboard;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::path::{Path, PathBuf};
 
 /// Configuration for the orchestrator.
@@ -142,19 +143,18 @@ impl Orchestrator {
         // Step 4: Start Referee
         self.start_referee()?;
 
-        // Step 5: Create evaluations
+        // Step 5: Boot enclave FIRST (VMs must be running before evaluations are created,
+        // otherwise capability nonces expire during the ~60s VM boot time)
         let evaluations = self.create_evaluations()?;
-
-        // Step 6: Write task file and boot enclave
         self.boot_enclave(&evaluations)?;
 
-        // Step 7: Wait for completion
+        // Step 6: Wait for completion
         self.wait_for_completion(&evaluations)?;
 
-        // Step 8: Seal batch
+        // Step 7: Seal batch
         self.seal_batch()?;
 
-        // Step 9: Verify
+        // Step 8: Verify
         let verified = self.run_verifier()?;
 
         self.trace.success(
@@ -272,6 +272,8 @@ impl Orchestrator {
             .arg("--snapshot-path").arg(self.config.snapshots_dir.join("llm-golden.snap"))
             .arg("--vsock-port").arg(self.config.vsock_port.to_string())
             .arg("--firecracker-bin").arg(&self.config.firecracker_bin)
+            // Capability TTL must exceed VM boot time (~60s); 5 minutes gives margin
+            .arg("--capability-ttl-ms").arg("300000")
             .current_dir(&self.config.root_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -418,6 +420,10 @@ impl Orchestrator {
     fn wait_for_completion(&self, evaluations: &[EvaluationRef]) -> Result<()> {
         self.trace.info(trace::TraceStage::Evaluation, "waiting for Red to complete all evaluations", Default::default());
 
+        // Give Red VM a few seconds to fully boot and connect to Referee
+        self.trace.info(trace::TraceStage::Evaluation, "giving Red VM time to boot and connect", Default::default());
+        std::thread::sleep(std::time::Duration::from_secs(15));
+
         let expected = evaluations.len();
         let eval_ids: Vec<&str> = evaluations.iter().map(|e| e.eval_id.as_str()).collect();
         let mut seen = std::collections::HashSet::new();
@@ -437,19 +443,32 @@ impl Orchestrator {
                         }
                     }
                 }
-            }
-            if seen.len() >= expected {
-                self.trace.success(
-                    trace::TraceStage::Evaluation,
-                    "all evaluations completed",
-                    {
-                        let mut m = std::collections::BTreeMap::new();
-                        m.insert("completed".into(), seen.len().into());
-                        m.insert("expected".into(), expected.into());
-                        m
-                    },
-                );
-                return Ok(());
+                if !seen.is_empty() {
+                    self.trace.info(
+                        trace::TraceStage::Evaluation,
+                        &format!("progress: {}/{} evaluations completed", seen.len(), expected),
+                        {
+                            let mut m = std::collections::BTreeMap::new();
+                            m.insert("completed".into(), seen.len().into());
+                            m.insert("expected".into(), expected.into());
+                            m.insert("completed_ids".into(), serde_json::to_value(seen.iter().collect::<Vec<_>>()).unwrap_or_default());
+                            m
+                        },
+                    );
+                }
+                if seen.len() >= expected {
+                    self.trace.success(
+                        trace::TraceStage::Evaluation,
+                        "all evaluations completed",
+                        {
+                            let mut m = std::collections::BTreeMap::new();
+                            m.insert("completed".into(), seen.len().into());
+                            m.insert("expected".into(), expected.into());
+                            m
+                        },
+                    );
+                    return Ok(());
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
@@ -461,6 +480,7 @@ impl Orchestrator {
                 let mut m = std::collections::BTreeMap::new();
                 m.insert("completed".into(), seen.len().into());
                 m.insert("expected".into(), expected.into());
+                m.insert("completed_ids".into(), serde_json::to_value(seen.iter().collect::<Vec<_>>()).unwrap_or_default());
                 m
             },
         );
