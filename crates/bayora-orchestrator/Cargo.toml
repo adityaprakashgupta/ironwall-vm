@@ -1,0 +1,43 @@
+[package]
+name = "bayora-orchestrator"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Bayora Enclave orchestrator — full lifecycle from artifact download to verified evaluations, with optional ratatui TUI dashboard."
+license = "Apache-2.0"
+
+[dependencies]
+# Workspace deps
+bayora-common = { path = "../bayora-common" }
+bayora-referee = { path = "../bayora-referee" }
+bayora-signer = { path = "../bayora-signer" }
+bayora-verifier = { path = "../bayora-verifier" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Optional TUI dashboard
+[features]
+tui = ["dep:ratatui", "dep:crossterm"]
+headless = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7"
+
+ratatui = { version = "0.27", optional = true }
+crossterm = { version = "0.27", optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
