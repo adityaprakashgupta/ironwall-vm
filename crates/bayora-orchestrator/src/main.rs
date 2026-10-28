@@ -336,6 +336,22 @@ async fn cmd_full(
             })?;
             lifecycle_result?;
 
+            // Kill any lingering Firecracker processes so all VMs show STOPPED
+            // and no Firecracker processes remain running after evaluation.
+            let _ = std::process::Command::new("sudo")
+                .arg("pkill")
+                .arg("-9")
+                .arg("firecracker")
+                .status();
+
+            // Kill any lingering Referee processes.
+            let _ = std::process::Command::new("sudo")
+                .arg("pkill")
+                .arg("-9")
+                .arg("-f")
+                .arg("bayora-referee")
+                .status();
+
             // Clean up socket files so the dashboard shows all VMs STOPPED.
             if let Ok(entries) = std::fs::read_dir(&config.runtime_dir) {
                 for entry in entries.flatten() {
@@ -363,6 +379,20 @@ async fn cmd_full(
         let _ = dashboard;
         let mut orchestrator = Orchestrator::new(config.clone())?;
         orchestrator.run_full_lifecycle().await?;
+
+        // Kill any lingering Firecracker processes after evaluation.
+        let _ = std::process::Command::new("sudo")
+            .arg("pkill")
+            .arg("-9")
+            .arg("firecracker")
+            .status();
+        let _ = std::process::Command::new("sudo")
+            .arg("pkill")
+            .arg("-9")
+            .arg("-f")
+            .arg("bayora-referee")
+            .status();
+
         Ok(())
     }
 }
