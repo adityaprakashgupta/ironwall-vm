@@ -171,7 +171,7 @@ fn load_state(trace_log: &Path, evidence_log: &Path) -> DashboardState {
             let prompt = state.prompts.get(&eval_id).cloned().unwrap_or_default();
 
             state.evaluations.push(EvalRow {
-                eval_id_short: eval_id.chars().take(8).collect::<String>(),
+                eval_id_short: eval_id.get(14..18).unwrap_or(&eval_id).to_string(),
                 prompt,
                 path,
                 held_us,
@@ -337,7 +337,7 @@ fn run_dashboard_loop(
     loop {
         if last_poll.elapsed() >= poll_interval {
             let state = load_state(&config.trace_log, &config.evidence_log);
-            terminal.draw(|f| draw_ui(f, &state))?;
+            terminal.draw(|f| draw_ui(f, &state, &config.runtime_dir, config.vsock_port))?;
             last_poll = Instant::now();
         }
 
@@ -355,7 +355,7 @@ fn run_dashboard_loop(
     Ok(())
 }
 
-fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState) {
+fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState, runtime_dir: &Path, vsock_port: u16) {
     // Three-row layout: title(3) | body(min) | trace(8).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -420,12 +420,19 @@ fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState) {
         .block(Block::default().borders(Borders::ALL).title("Pipeline Stages"));
     f.render_widget(pipeline, left_chunks[0]);
 
-    // VM states panel — only Blue is orchestrator-booted; Red/LLM are Referee-managed.
+    // VM states panel — check socket files directly on disk since Red/LLM are
+    // Referee-managed and never appear in the orchestrator trace log.
     let vm_items: Vec<ListItem> = VMS.iter().map(|(name, cid, manager)| {
-        let default_vm = (false, None, *manager);
-        let (running, socket, _) = state.vms.get(*name).unwrap_or(&default_vm);
-        let status = if *running { "RUNNING" } else { "STOPPED" };
-        let style = if *running {
+        // Socket paths: blue.vsock, red.vsock_5000, llm.vsock
+        let vsock_path = if *name == "red" {
+            runtime_dir.join(format!("{}.vsock_{}", name, vsock_port))
+        } else {
+            runtime_dir.join(format!("{}.vsock", name))
+        };
+        let running = vsock_path.exists();
+        let socket = if running { Some(vsock_path.display().to_string()) } else { None };
+        let status = if running { "RUNNING" } else { "STOPPED" };
+        let style = if running {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Red)
