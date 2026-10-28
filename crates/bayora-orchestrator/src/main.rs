@@ -12,6 +12,8 @@
 use bayora_orchestrator::{
     artifacts, evaluations, images, microvm, trace::{self, Trace}, Orchestrator, OrchestratorConfig,
 };
+#[cfg(feature = "tui")]
+use bayora_orchestrator::dashboard;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
