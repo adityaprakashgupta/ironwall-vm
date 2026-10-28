@@ -212,7 +212,8 @@ fn build_role_image(
     Command::new("dd")
         .arg("if=/dev/zero")
         .arg(&format!("of={}", image_path.display()))
-        .arg(&format!("bs=1M count={size_mb}"))
+        .arg("bs=1M")
+        .arg(&format!("count={size_mb}"))
         .arg("status=none")
         .status()?;
 
@@ -417,13 +418,14 @@ fn take_golden_snapshot(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Start the instance
-    let client = reqwest::blocking::Client::new();
-    client
-        .put(format!("http://localhost/actions"))
-        .header("Content-Type", "application/json")
-        .body(json!({"action_type": "InstanceStart"}).to_string())
-        .send()?;
+    // Start the instance via Firecracker API (Unix socket)
+    let _ = Command::new("curl")
+        .arg("-s").arg("-f").arg("-X").arg("PUT")
+        .arg("http://localhost/actions")
+        .arg("--unix-socket").arg(&api_sock)
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(r#"{"action_type":"InstanceStart"}"#)
+        .status()?;
 
     // Wait for vsock socket
     for _ in 0..100 {
@@ -449,23 +451,26 @@ fn take_golden_snapshot(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Pause the VM
-    client
-        .patch(format!("http://localhost/vm"))
-        .header("Content-Type", "application/json")
-        .body(json!({"state": "Paused"}).to_string())
-        .send()?;
+    // Pause the VM via Firecracker API (Unix socket)
+    let _ = Command::new("curl")
+        .arg("-s").arg("-f").arg("-P").arg("http://localhost/vm")
+        .arg("--unix-socket").arg(&api_sock)
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(r#"{"state":"Paused"}"#)
+        .status()?;
 
-    // Create snapshot
-    client
-        .put(format!("http://localhost/snapshot/create"))
-        .header("Content-Type", "application/json")
-        .body(json!({
-            "snapshot_type": "Full",
-            "snapshot_path": snapshot_path.display().to_string(),
-            "mem_file_path": mem_path.display().to_string()
-        }).to_string())
-        .send()?;
+    // Create snapshot via Firecracker API (Unix socket)
+    let _ = Command::new("curl")
+        .arg("-s").arg("-f").arg("-X").arg("PUT")
+        .arg("http://localhost/snapshot/create")
+        .arg("--unix-socket").arg(&api_sock)
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(&format!(
+            r#"{{"snapshot_type":"Full","snapshot_path":"{}","mem_file_path":"{}"}}"#,
+            snapshot_path.display(),
+            mem_path.display()
+        ))
+        .status()?;
 
     // Kill Firecracker
     let _ = fc.kill();
