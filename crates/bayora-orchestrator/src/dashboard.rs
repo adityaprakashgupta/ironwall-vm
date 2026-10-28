@@ -422,15 +422,19 @@ fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState, runtime_dir: &Path, v
 
     // VM states panel — check socket files directly on disk since Red/LLM are
     // Referee-managed and never appear in the orchestrator trace log.
+    // Check multiple possible paths for each VM socket.
     let vm_items: Vec<ListItem> = VMS.iter().map(|(name, cid, manager)| {
-        // Socket paths: blue.vsock, red.vsock_5000, llm.vsock
-        let vsock_path = if *name == "red" {
-            runtime_dir.join(format!("{}.vsock_{}", name, vsock_port))
-        } else {
-            runtime_dir.join(format!("{}.vsock", name))
+        let candidate_paths: Vec<std::path::PathBuf> = match *name {
+            "red" => vec![
+                runtime_dir.join(format!("{}.vsock_{}", name, vsock_port)),
+                runtime_dir.join(format!("{}.vsock", name)),
+                runtime_dir.join(format!("fc-{}.sock", name)),
+            ],
+            _ => vec![runtime_dir.join(format!("{}.vsock", name))],
         };
-        let running = vsock_path.exists();
-        let socket = if running { Some(vsock_path.display().to_string()) } else { None };
+        let running = candidate_paths.iter().any(|p| p.exists());
+        let socket = candidate_paths.iter().find(|p| p.exists())
+            .map(|p| p.display().to_string());
         let status = if running { "RUNNING" } else { "STOPPED" };
         let style = if running {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)

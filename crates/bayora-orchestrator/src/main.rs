@@ -336,6 +336,20 @@ async fn cmd_full(
             })?;
             lifecycle_result?;
 
+            // Clean up socket files so the dashboard shows all VMs STOPPED.
+            if let Ok(entries) = std::fs::read_dir(&config.runtime_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.ends_with(".vsock")
+                        || name_str.ends_with(".sock")
+                        || name_str.ends_with(".pid")
+                    {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+
             Ok(dashboard_result)
         } else {
             let mut orchestrator = Orchestrator::new(config.clone())?;
