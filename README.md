@@ -165,7 +165,7 @@ block, and (on a blocking turn) any other terminating stage:
 
 ## Bounded Observable Execution
 
-The Referee measures only *bucketed* elapsed time. Under `EVAL_500`:
+The Referee measures only *bucketed* elapsed time. Under `EVAL_1000`:
 
 * `T_bucket = 500 ms`, `abort_margin = 15 ms`;
 * work that finishes before `T_bucket − margin` is held until the bucket
@@ -177,7 +177,7 @@ The Referee measures only *bucketed* elapsed time. Under `EVAL_500`:
 The dashboard recomputes attacker inference accuracy from the observed
 latencies: `1-D k-means (k=3)` clusters the timings, then labels each cluster by
 majority vote. Baseline (`NORMAL`) exposes three clean bands → accuracy ≈ 1.0;
-`EVAL_500` collapses to one band → accuracy ≈ 0.33 (chance). The verifier
+`EVAL_1000` collapses to one band → accuracy ≈ 0.33 (chance). The verifier
 reproduces this measurement from the evidence log alone.
 
 Two honest caveats, both enforced in code rather than in prose:
@@ -265,7 +265,7 @@ VALID
   unsealed      : 0
   chain head    : 3f9a1c8e2b47d0a5…
   trust anchor  : daae177d0f9d9f2048d47463b4dea1e5059609392f1d6b8339eeb31913dbc0e9
-  timing        : EVAL_500 - 3 sample(s), held 501233..503011us, stddev 812us (0.1612% of mean), inference accuracy not measurable (3 samples across 3 stage(s); need 9+ over 2+) (bounded)
+  timing        : EVAL_1000 - 3 sample(s), held 1001233..1003011us, stddev 812us (0.1612% of mean), inference accuracy not measurable (3 samples across 3 stage(s); need 9+ over 2+) (bounded)
 ```
 
 With `--strict-timing` and too few samples the same run adds an explicit note

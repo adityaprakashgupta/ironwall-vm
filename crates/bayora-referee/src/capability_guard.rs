@@ -79,6 +79,16 @@ impl From<CapError> for GuardError {
 /// Capability nonces are 64-bit random values bound to a single evaluation, so
 /// the working set is naturally small; the bound exists to make memory growth
 /// impossible even under a flood of well-formed tokens.
+///
+/// # Replay window (residual risk)
+///
+/// Consumed nonces are evicted once the set exceeds `capacity` (default 4096).
+/// An attacker who floods the Referee with more than `capacity` distinct valid
+/// tokens can cause an old nonce to be evicted, after which replaying that old
+/// token is accepted again. This is a bounded replay window, not an indefinite
+/// one. For deployments where replay must be impossible across restarts or
+/// token floods, persist consumed nonces to a bounded on-disk set or use a
+/// hardware trust anchor that enforces single-use at the signing layer.
 #[derive(Debug)]
 struct ConsumedNonces {
     set: HashSet<String>,

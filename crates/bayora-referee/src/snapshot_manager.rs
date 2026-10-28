@@ -238,55 +238,6 @@ impl ProcessRecycle {
         )))
     }
 
-    /// Wait until the restored guest answers Firecracker's `CONNECT <port>`
-    /// handshake. The device binds its socket the moment the snapshot loads,
-    /// but the guest inside may still be booting — a turn must not race it.
-    #[allow(dead_code)]
-    async fn wait_ready(&self, port: u32) -> Result<(), ResetError> {
-        #[cfg(unix)]
-        {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            let deadline = Instant::now() + self.ready_timeout;
-            loop {
-                if let Ok(mut stream) = tokio::net::UnixStream::connect(&self.uds_path).await {
-                    let handshake = async {
-                        stream
-                            .write_all(format!("CONNECT {port}\n").as_bytes())
-                            .await?;
-                        let mut ack = Vec::new();
-                        let mut byte = [0u8; 1];
-                        while byte[0] != b'\n' && ack.len() < 32 {
-                            stream.read_exact(&mut byte).await?;
-                            ack.push(byte[0]);
-                        }
-                        Ok::<Vec<u8>, std::io::Error>(ack)
-                    };
-                    if let Ok(ack) = handshake.await {
-                        if ack.starts_with(format!("OK {port}").as_bytes()) {
-                            return Ok(());
-                        }
-                    }
-                    // Device answered but the guest has nothing listening
-                    // yet: it is still booting. Try again.
-                }
-                if Instant::now() >= deadline {
-                    return Err(ResetError::Unavailable(format!(
-                        "restored workload never answered CONNECT {port} on {} within {:?}",
-                        self.uds_path.display(),
-                        self.ready_timeout
-                    )));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (port, self.ready_timeout);
-            Ok(())
-        }
-    }
-
     /// SIGKILL the pid named by the pidfile, refusing to act on a stale file
     /// whose pid has since been recycled by an unrelated process.
     async fn kill_pidfile(pidfile: &std::path::Path) {
@@ -368,6 +319,7 @@ impl FirecrackerSnapshotManager {
         let body = json!({
             "snapshot_type": "Full",
             "snapshot_path": self.snapshot_path.display().to_string(),
+            "mem_file_path": self.mem_path.display().to_string(),
         });
         let started = Instant::now();
         self.fc_put("/snapshot/create", &body).await?;
@@ -458,13 +410,13 @@ impl ResetManager for FirecrackerSnapshotManager {
 
         // 3. The reset is not complete until the restored workload answers:
         //    the first turn after it must never race the guest's boot.
-        //    Firecracker's vsock device for restored snapshots doesn't
-        //    reliably mediate host-initiated CONNECT handshakes, so instead
-        //    of probing we give the guest a moment to come up and let the
-        //    first ask_llm call surface any boot issues.
+        //    After loading the snapshot into a fresh Firecracker process, the
+        //    vsock device needs a moment to initialise. Give it a short
+        //    grace period, then let the transport layer's retry logic handle
+        //    any remaining transient connection failures.
         if let Some(process) = &self.process {
             if process.readiness_port.is_some() {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }
 

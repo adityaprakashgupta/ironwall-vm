@@ -41,3 +41,8 @@ lto = "thin"
 codegen-units = 1
 opt-level = 3
 panic = "abort"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde_json = "1"
+hex = "0.4"

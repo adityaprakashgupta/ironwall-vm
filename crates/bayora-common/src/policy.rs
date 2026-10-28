@@ -61,6 +61,9 @@ pub enum TimingMode {
     /// Hold every response to a 1000 ms bucket boundary.
     #[serde(rename = "EVAL_1000")]
     Eval1000,
+    /// Hold every response to a 2000 ms bucket boundary.
+    #[serde(rename = "EVAL_2000")]
+    Eval2000,
 }
 
 impl TimingMode {
@@ -70,6 +73,7 @@ impl TimingMode {
             TimingMode::Normal => None,
             TimingMode::Eval500 => Some(Duration::from_millis(500)),
             TimingMode::Eval1000 => Some(Duration::from_millis(1000)),
+            TimingMode::Eval2000 => Some(Duration::from_millis(2000)),
         }
     }
 
@@ -78,6 +82,7 @@ impl TimingMode {
             TimingMode::Normal => "NORMAL",
             TimingMode::Eval500 => "EVAL_500",
             TimingMode::Eval1000 => "EVAL_1000",
+            TimingMode::Eval2000 => "EVAL_2000",
         }
     }
 }
@@ -301,7 +306,7 @@ mod tests {
     const POLICY: &str = r#"
 policy_version: "2026.10.v3"
 evaluation:
-  timing_mode: "EVAL_500"
+  timing_mode: "EVAL_1000"
   response_frame_bytes: 4096
   max_prompt_bytes: 8192
   max_tokens: 64
@@ -325,7 +330,7 @@ audit:
     fn parses_shipped_policy_shape() {
         let p = PolicyConfig::from_yaml(POLICY).unwrap();
         assert_eq!(p.policy_version, "2026.10.v3");
-        assert_eq!(p.evaluation.timing_mode, TimingMode::Eval500);
+        assert_eq!(p.evaluation.timing_mode, TimingMode::Eval1000);
         assert_eq!(p.evaluation.abort_margin_ms, 15); // default
         assert_eq!(p.audit.batch_size, 8); // default
         assert_eq!(p.state.reset_policy, ResetPolicy::Snapshot);
@@ -356,7 +361,7 @@ audit:
 
     #[test]
     fn rejects_margin_ge_bucket() {
-        let bad = POLICY.replace("max_tokens: 64", "max_tokens: 64\n  abort_margin_ms: 500");
+        let bad = POLICY.replace("max_tokens: 64", "max_tokens: 64\n  abort_margin_ms: 1000");
         assert!(PolicyConfig::from_yaml(&bad).is_err());
     }
 

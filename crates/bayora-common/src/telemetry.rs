@@ -92,7 +92,7 @@ pub fn kmeans_1d(points: &[f64], k: usize, iterations: usize) -> Vec<usize> {
 /// toward the lowest label id). Returns a value in `[0, 1]`.
 ///
 /// * baseline: three separable timing bands => accuracy near 1.0
-/// * EVAL_500: all timings identical => one cluster absorbs everything =>
+/// * EVAL_1000: all timings identical => one cluster absorbs everything =>
 ///   accuracy collapses to the majority-label share (~1/k for balanced classes)
 pub fn inference_accuracy(points: &[f64], labels: &[usize], k: usize) -> f64 {
     assert_eq!(points.len(), labels.len(), "points/labels length mismatch");
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn collapsed_points_collapse_to_majority_share() {
-        // EVAL_500: every sample lands on the same bucket boundary.
+        // EVAL_1000: every sample lands on the same bucket boundary.
         let points = vec![500.0; 30];
         let labels: Vec<usize> = (0..30).map(|i| i % 3).collect();
         let acc = inference_accuracy(&points, &labels, 3);

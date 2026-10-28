@@ -3,7 +3,7 @@
 //! boot_enclave.sh, giving full control over the boot lifecycle.
 
 use crate::trace::{Trace, TraceStage};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use std::fs;
 use std::io::Read;
@@ -109,7 +109,7 @@ pub fn boot_enclave(
 }
 
 /// Boot a single Firecracker MicroVM.
-fn boot_single_vm(
+pub fn boot_single_vm(
     trace: &Trace,
     role: &str,
     cid: u32,
@@ -127,9 +127,10 @@ fn boot_single_vm(
     let vsock_uds = runtime_dir.join(format!("{role}.vsock"));
     let config_path = runtime_dir.join(format!("fc-{role}.json"));
 
-    // Remove stale sockets
+    // Remove stale sockets and config from previous runs
     let _ = fs::remove_file(&api_sock);
     let _ = fs::remove_file(&vsock_uds);
+    let _ = fs::remove_file(&config_path);
 
     // Build drives JSON
     let mut drives = vec![json!({
@@ -168,15 +169,21 @@ fn boot_single_vm(
         "logger": { "log_path": runtime_dir.join(format!("{role}.log")).display().to_string(), "level": "Warning" }
     });
 
-    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)
+    .with_context(|| format!("failed to write firecracker config to {}", config_path.display()))?;
 
-    // Start Firecracker
-    let mut fc = Command::new(firecracker_bin)
+    // Start Firecracker (requires root for KVM vsock; run via sudo)
+    let fc_log = std::fs::File::create(runtime_dir.join(format!("fc-{role}.fcout")))
+        .with_context(|| format!("failed to create fc log for role {role}"))
+        .expect("failed to create fc log");
+    let spawn_result = Command::new("sudo")
+        .arg(firecracker_bin)
         .arg("--api-sock").arg(&api_sock)
         .arg("--config-file").arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stdout(fc_log.try_clone().unwrap())
+        .stderr(fc_log)
+        .spawn();
+    let _fc = spawn_result?;
 
     // Wait for API socket
     for _ in 0..100 {
@@ -186,21 +193,39 @@ fn boot_single_vm(
         thread::sleep(Duration::from_millis(100));
     }
 
-    // Start the instance via Firecracker API
-    let client = reqwest::blocking::Client::new();
-    client
-        .put(format!("http://localhost/actions"))
-        .header("Content-Type", "application/json")
-        .body(json!({"action_type": "InstanceStart"}).to_string())
-        .send()?;
+    // Start the instance via Firecracker API (Unix socket)
+    let _ = Command::new("curl")
+        .arg("-s").arg("-f").arg("-X").arg("PUT")
+        .arg("http://localhost/actions")
+        .arg("--unix-socket").arg(&api_sock)
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(r#"{"action_type":"InstanceStart"}"#)
+        .status()?;
 
-    // Wait for vsock socket
-    for _ in 0..100 {
+    // Wait for vsock socket (can take a while for Firecracker to create it)
+    let mut vsock_found = false;
+    for _ in 0..600 {
         if vsock_uds.exists() {
+            vsock_found = true;
             break;
         }
         thread::sleep(Duration::from_millis(100));
     }
+    if !vsock_found {
+        return Err(anyhow!(
+            "vsock socket {} never appeared after 60 seconds",
+            vsock_uds.display()
+        ));
+    }
+
+    // Make vsock world-readable/writable so Referee (which may run as a
+    // different user) can connect to it, matching boot_enclave.sh behavior.
+    // Firecracker runs as root (via sudo), so chmod must also run as root.
+    let _ = Command::new("sudo")
+        .arg("chmod")
+        .arg("0666")
+        .arg(&vsock_uds)
+        .status();
 
     // Keep the Firecracker process running (don't kill it)
     // We intentionally don't call fc.wait() - the process runs in background

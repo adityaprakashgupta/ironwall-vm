@@ -7,7 +7,7 @@
 //! channel that lets an adversary probe the Blue-team policy without seeing it.
 //!
 //! The fix is structural rather than statistical: every response in
-//! `EVAL_500` mode is released at the *same* 500 ms bucket boundary, because
+//! `EVAL_1000` mode is released at the *same* 1000 ms bucket boundary, because
 //! work that has not finished by `T_bucket − abort_margin` is cancelled and
 //! replaced by a constant timeout envelope. Observable timing therefore carries
 //! no information about the path taken.
@@ -179,9 +179,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn eval_500_holds_fast_paths_to_the_bucket() {
-        let guard = TimingGuard::new(TimingMode::Eval500, MARGIN);
-        // A 2 ms regex block must still be observed at 500 ms.
+    async fn eval_1000_holds_fast_paths_to_the_bucket() {
+        let guard = TimingGuard::new(TimingMode::Eval1000, MARGIN);
+        // A 2 ms regex block must still be observed at 1000 ms.
         let outcome = guard
             .execute(async {
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -190,13 +190,13 @@ mod tests {
             .await;
         assert!(!outcome.is_aborted());
         guard.wait_for_release().await;
-        assert_eq!(guard.elapsed(), Duration::from_millis(500));
+        assert_eq!(guard.elapsed(), Duration::from_millis(1000));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn eval_500_aborts_work_past_the_deadline() {
-        let guard = TimingGuard::new(TimingMode::Eval500, MARGIN);
-        // 700 ms of LLM work cannot fit; it is cancelled at 485 ms.
+    async fn eval_1000_aborts_work_past_the_deadline() {
+        let guard = TimingGuard::new(TimingMode::Eval1000, MARGIN);
+        // 700 ms of LLM work fits within 985 ms; it completes rather than aborting.
         let outcome = guard
             .execute(async {
                 tokio::time::sleep(Duration::from_millis(700)).await;
@@ -204,14 +204,14 @@ mod tests {
             })
             .await;
         match outcome {
-            BoundedOutcome::DeadlineAborted { at } => {
-                assert_eq!(at, Duration::from_millis(485));
+            BoundedOutcome::Completed(value) => {
+                assert_eq!(value, "llm");
             }
-            other => panic!("expected abort, got {other:?}"),
+            other => panic!("expected completed, got {other:?}"),
         }
         // Release still happens exactly at the bucket boundary.
         guard.wait_for_release().await;
-        assert_eq!(guard.elapsed(), Duration::from_millis(500));
+        assert_eq!(guard.elapsed(), Duration::from_millis(1000));
     }
 
     #[tokio::test(start_paused = true)]
@@ -220,18 +220,18 @@ mod tests {
         // present identical observable latency.
         let mut observed = Vec::new();
         for work_ms in [2u64, 160, 480, 700] {
-            let guard = TimingGuard::new(TimingMode::Eval500, MARGIN);
-            let _ = guard
-                .execute(async move {
-                    tokio::time::sleep(Duration::from_millis(work_ms)).await;
-                    ()
-                })
-                .await;
-            guard.wait_for_release().await;
-            observed.push(guard.elapsed());
+            let guard = TimingGuard::new(TimingMode::Eval1000, MARGIN);
+        let _ = guard
+            .execute(async move {
+                tokio::time::sleep(Duration::from_millis(work_ms)).await;
+                ()
+            })
+            .await;
+        guard.wait_for_release().await;
+        observed.push(guard.elapsed());
         }
         assert!(
-            observed.iter().all(|d| *d == Duration::from_millis(500)),
+            observed.iter().all(|d| *d == Duration::from_millis(1000)),
             "all paths must be indistinguishable, got {observed:?}"
         );
     }
@@ -248,10 +248,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn work_finishing_exactly_at_the_deadline_counts_as_completed() {
-        let guard = TimingGuard::new(TimingMode::Eval500, MARGIN);
+        let guard = TimingGuard::new(TimingMode::Eval1000, MARGIN);
         let outcome = guard
             .execute(async {
-                tokio::time::sleep(Duration::from_millis(485)).await;
+                tokio::time::sleep(Duration::from_millis(985)).await;
                 "just-in-time"
             })
             .await;
@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn abort_deadline_never_precedes_the_start() {
-        let guard = TimingGuard::new(TimingMode::Eval500, Duration::from_millis(900));
-        // Bucket 500 ms < margin 900 ms would be rejected by policy, but the
+        let guard = TimingGuard::new(TimingMode::Eval1000, Duration::from_millis(900));
+        // Bucket 1000 ms < margin 900 ms would be rejected by policy, but the
         // guard itself must saturate rather than panic.
         let abort_at = guard.abort_at().unwrap();
         assert!(abort_at >= guard.started());

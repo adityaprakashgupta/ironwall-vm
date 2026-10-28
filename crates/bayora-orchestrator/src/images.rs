@@ -307,6 +307,54 @@ fn stage_python(_trace: &Trace, stage_dir: &Path) -> Result<()> {
     // Copy the Python binary
     fs::copy(&python_bin, stage_dir.join("usr/bin/python3"))?;
 
+    // Copy the Python standard library. Discover its location via sysconfig so
+    // this works on any host (Debian, RHEL, Alpine, etc.). Without the stdlib,
+    // the red/blue agents cannot import `json`, `socket`, `sys`, etc. and fail
+    // at import time.
+    let stdlib_dir = {
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import sysconfig; print(sysconfig.get_paths()[\"stdlib\"])")
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("failed to discover Python stdlib path"));
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let stdlib_path = std::path::Path::new(&stdlib_dir);
+    if !stdlib_path.is_dir() {
+        return Err(anyhow!(
+            "Python stdlib directory not found: {}",
+            stdlib_path.display()
+        ));
+    }
+
+    for entry in std::fs::read_dir(stdlib_path)? {
+        let entry = entry?;
+        let dest = stage_dir.join("usr/lib64/python3").join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            fs::copy(src_path, &dst_path)?;
+        }
+    }
     Ok(())
 }
 

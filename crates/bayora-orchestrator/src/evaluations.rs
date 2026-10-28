@@ -75,7 +75,7 @@ pub fn create_evaluations(
 /// Run turns for all evaluations. In the full Firecracker workflow, Red
 /// VM reads the task file and sends prompts via vsock. Here we simulate
 /// that by having Red connect via vsock.
-pub async fn run_turns_vsock(
+pub fn run_turns_vsock(
     trace: &Trace,
     runtime_dir: &Path,
     evaluations: &[Evaluation],

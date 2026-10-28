@@ -83,7 +83,7 @@ pub trait WorkloadTransport: Send + Sync {
 /// Deterministic stub used for development, the demo and tests.
 ///
 /// Latencies mirror the real deployment's three observable bands, which is
-/// what makes the baseline-vs-`EVAL_500` contrast visible on the HUD:
+/// what makes the baseline-vs-`EVAL_1000` contrast visible on the HUD:
 /// * regex denylist hit — 2 ms
 /// * semantic classifier hit / clean pass through Blue — 160 ms
 /// * the LLM path adds a further 180 ms (340 ms total)
@@ -508,7 +508,7 @@ impl crate::snapshot_manager::ResetManager for LlmEngineResetManager {
             crate::snapshot_manager::ResetError::Io(e.to_string())
         })?;
         Ok(crate::snapshot_manager::ResetReport {
-            policy: bayora_common::policy::ResetPolicy::Snapshot,
+            policy: bayora_common::policy::ResetPolicy::LogicalKv,
             duration_us: started.elapsed().as_micros() as u64,
             detail: "llm engine context reset (KV cache cleared)".into(),
             simulated: false,
@@ -516,7 +516,7 @@ impl crate::snapshot_manager::ResetManager for LlmEngineResetManager {
     }
 
     fn policy(&self) -> bayora_common::policy::ResetPolicy {
-        bayora_common::policy::ResetPolicy::Snapshot
+        bayora_common::policy::ResetPolicy::LogicalKv
     }
 
     fn describe(&self) -> String {

@@ -18,6 +18,14 @@ edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
 
+# Workspace-level features. `postgres` enables the dual-sink evidence plane
+# (PostgreSQL + append-only NDJSON log) in bayora-referee and bayora-verifier.
+# Production deployments should build with:
+#   cargo build --release --features postgres
+# and pass --postgres-url to bayora-referee and --postgres-url to bayora-verifier.
+[workspace.features]
+postgres = ["bayora-referee/postgres", "bayora-verifier/postgres"]
+
 [workspace.dependencies]
 bayora-common = { path = "crates/bayora-common" }
 bayora-llm-engine = { path = "crates/bayora-llm-engine" }

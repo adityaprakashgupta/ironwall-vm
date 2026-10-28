@@ -108,7 +108,7 @@ mod tests {
         PolicyConfig::from_yaml(
             r#"
 policy_version: "2026.10.v3"
-evaluation: { timing_mode: "EVAL_500", response_frame_bytes: 4096, max_prompt_bytes: 8192, max_tokens: 64 }
+evaluation: { timing_mode: "EVAL_1000", response_frame_bytes: 4096, max_prompt_bytes: 8192, max_tokens: 64 }
 network: { red_to_blue: "MEDIATED", red_to_llm: "MEDIATED", blue_to_red: "DENIED" }
 state: { reset_policy: "SNAPSHOT", cache_prompt: false }
 resources:
@@ -184,7 +184,7 @@ audit: { require_manifest_signature: true, dual_write_append_log: true }
             "t",
             "n",
         );
-        assert_eq!(m.timing_policy, "EVAL_500");
+        assert_eq!(m.timing_policy, "EVAL_1000");
         assert_eq!(m.reset_policy, "SNAPSHOT");
         assert_eq!(m.resource_policy, "cpu:1-2-3,4_mem:512-1024-2048");
         assert_eq!(m.referee_version, "sha256:ef2d127d");

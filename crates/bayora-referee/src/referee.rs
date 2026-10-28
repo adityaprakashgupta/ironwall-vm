@@ -618,12 +618,15 @@ mod tests {
         let mut yaml = include_str!("../../../config/policy.yaml").to_string();
         match timing_mode {
             TimingMode::Normal => {
-                yaml = yaml.replace("timing_mode: \"EVAL_500\"", "timing_mode: \"NORMAL\"")
+                yaml = yaml.replace("timing_mode: \"EVAL_1000\"", "timing_mode: \"NORMAL\"")
             }
             TimingMode::Eval1000 => {
-                yaml = yaml.replace("timing_mode: \"EVAL_500\"", "timing_mode: \"EVAL_1000\"")
+                yaml = yaml.replace("timing_mode: \"EVAL_1000\"", "timing_mode: \"EVAL_1000\"")
             }
             TimingMode::Eval500 => {}
+            TimingMode::Eval2000 => {
+                yaml = yaml.replace("timing_mode: \"EVAL_1000\"", "timing_mode: \"EVAL_2000\"")
+            }
         }
         let policy = StdArc::new(PolicyEngine::from_yaml(&yaml).unwrap());
         let images = StdArc::new(ImageRegistry::load(
@@ -660,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn create_signs_manifest_before_any_prompt() {
         use bayora_common::signature::verify_digest_signature;
-        let (state, keys, _signer, _dir) = live_state(TimingMode::Eval500).await;
+        let (state, keys, _signer, _dir) = live_state(TimingMode::Eval1000).await;
         let created = state.create_evaluation().await.unwrap();
         assert!(created.evaluation_id.starts_with("eval_"));
         // The manifest hash matches a fresh recomputation, and the signature
@@ -680,7 +683,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn turn_is_held_to_the_bucket_and_chained() {
-        let (state, _keys, _signer, _dir) = live_state(TimingMode::Eval500).await;
+        let (state, _keys, _signer, _dir) = live_state(TimingMode::Eval1000).await;
         let created = state.create_evaluation().await.unwrap();
         let outcome = state
             .run_turn(&created.evaluation_id, &created.token, "hello world")
@@ -691,7 +694,7 @@ mod tests {
         assert_eq!(outcome.frame.len(), 4096, "constant-size egress");
         assert!(!outcome.truncated);
         assert_eq!(outcome.seq, 0);
-        assert_eq!(outcome.held_us, 500_000, "released at the bucket");
+        assert_eq!(outcome.held_us, 1_000_000, "released at the bucket");
         // The frame parses back into an envelope with no stage disclosure.
         let env = bayora_common::frame::parse_padded_response(&outcome.frame).unwrap();
         assert_eq!(env.status, "ok");

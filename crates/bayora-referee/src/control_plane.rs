@@ -345,11 +345,12 @@ mod tests {
         let trust_anchor: Arc<dyn TrustAnchorSigner> = socket_signer.clone();
 
         let yaml = include_str!("../../../config/policy.yaml").replacen(
-            "timing_mode: \"EVAL_500\"",
+            "timing_mode: \"EVAL_1000\"",
             match timing_mode {
                 TimingMode::Normal => "timing_mode: \"NORMAL\"",
-                TimingMode::Eval500 => "timing_mode: \"EVAL_500\"",
                 TimingMode::Eval1000 => "timing_mode: \"EVAL_1000\"",
+                TimingMode::Eval500 => "timing_mode: \"EVAL_500\"",
+                TimingMode::Eval2000 => "timing_mode: \"EVAL_2000\"",
             },
             1,
         );
@@ -407,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_and_posture_serve_the_hud() {
-        let (addr, _dir) = spawn_api(TimingMode::Eval500).await;
+        let (addr, _dir) = spawn_api(TimingMode::Eval1000).await;
         let health = mini_http::tcp_request(addr, "GET", "/healthz", None).await.unwrap();
         assert_eq!(health.status, 200);
         assert_eq!(health.body_str().unwrap(), "ok");
@@ -415,8 +416,8 @@ mod tests {
         let resp = mini_http::tcp_request(addr, "GET", "/v1/posture", None).await.unwrap();
         let posture: PostureResponse = parse(&resp);
         assert_eq!(posture.policy_version, "2026.10.v3");
-        assert_eq!(posture.timing.mode, "EVAL_500");
-        assert_eq!(posture.timing.bucket_ms, Some(500));
+        assert_eq!(posture.timing.mode, "EVAL_1000");
+        assert_eq!(posture.timing.bucket_ms, Some(1000));
         assert_eq!(posture.timing.abort_margin_ms, 15);
         assert_eq!(posture.reset_policy, "SNAPSHOT");
         assert_eq!(posture.evidence.chain_len, 0);
@@ -430,7 +431,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn full_turn_flow_over_http() {
-        let (addr, _dir) = spawn_api(TimingMode::Eval500).await;
+        let (addr, _dir) = spawn_api(TimingMode::Eval1000).await;
 
         // 1. Create: manifest signed before any prompt exists.
         let created_resp = mini_http::tcp_request(addr, "POST", "/v1/evaluations", Some(b"{}"))
@@ -458,7 +459,7 @@ mod tests {
         assert_eq!(turn.status, "ok");
         assert_eq!(turn.frame_bytes, 4096);
         assert_eq!(turn.telemetry.path, "llm");
-        assert_eq!(turn.telemetry.held_us, 500_000);
+        assert_eq!(turn.telemetry.held_us, 1_000_000);
         assert!(!turn.telemetry.deadline_aborted);
         assert_eq!(turn.evidence.seq, 0);
         // The released frame parses and discloses no stage.

@@ -4,10 +4,10 @@
 
 policy_version: "2026.10.v3"
 evaluation:
-  timing_mode: "EVAL_500"          # Options: NORMAL | EVAL_500 | EVAL_1000
+  timing_mode: "EVAL_1000"      # Options: NORMAL | EVAL_500 | EVAL_1000 | EVAL_2000
   response_frame_bytes: 4096       # Constant egress packet size
   max_prompt_bytes: 8192           # Strict ingress frame ceiling
-  max_tokens: 8                    # Bounded generation length (fits EVAL_500 bucket on CPU)
+  max_tokens: 64                    # Bounded generation length (fits EVAL_1000 bucket on CPU)
   # abort_margin_ms: 15            # (default) deadline cutoff margin before T_bucket
 
 network:

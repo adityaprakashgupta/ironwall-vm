@@ -167,7 +167,8 @@ pub fn ensure_artifacts(
         );
         // Download tarball, extract, verify
         let tarball = artifacts_dir.join(format!("firecracker-{version}-{arch}.tgz"));
-        download_artifact(trace, &url, &tarball, None)?;
+        let expected_sha256 = std::env::var("BAYORA_FIRECRACKER_SHA256").ok();
+        download_artifact(trace, &url, &tarball, expected_sha256.as_deref())?;
 
         // Extract
         let output = Command::new("tar")
@@ -198,7 +199,8 @@ pub fn ensure_artifacts(
         // Discover newest kernel from Firecracker CI S3
         let key = discover_kernel(std::env::consts::ARCH)?;
         let url = format!("https://s3.amazonaws.com/spec.ccfc.min/{key}");
-        download_artifact(trace, &url, &kernel_path, None)?;
+        let expected_sha256 = std::env::var("BAYORA_KERNEL_SHA256").ok();
+        download_artifact(trace, &url, &kernel_path, expected_sha256.as_deref())?;
     }
     verify_kernel(trace, &kernel_path)?;
 
@@ -206,7 +208,8 @@ pub fn ensure_artifacts(
     if !model_path.exists() {
         let model_url = std::env::var("BAYORA_MODEL_URL")
             .unwrap_or_else(|_| "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string());
-        download_artifact(trace, &model_url, &model_path, None)?;
+        let expected_sha256 = std::env::var("BAYORA_MODEL_SHA256").ok();
+        download_artifact(trace, &model_url, &model_path, expected_sha256.as_deref())?;
     }
     verify_model(trace, &model_path)?;
 

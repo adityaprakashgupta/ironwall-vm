@@ -211,15 +211,15 @@ mod tests {
 
     #[test]
     fn bounded_mode_collapses_inference_to_chance() {
-        // EVAL_500: every response released at exactly 500 ms.
+        // EVAL_1000: every response released at exactly 1000 ms.
         let mut bands = Vec::new();
         for _ in 0..10 {
-            bands.push((500_000.0, PathLabel::RegexBlock));
-            bands.push((500_000.0, PathLabel::SemanticBlock));
-            bands.push((500_000.0, PathLabel::Llm));
+            bands.push((1_000_000.0, PathLabel::RegexBlock));
+            bands.push((1_000_000.0, PathLabel::SemanticBlock));
+            bands.push((1_000_000.0, PathLabel::Llm));
         }
-        let metrics = labelled(TimingMode::Eval500, &bands);
-        let stats = &metrics.posture().modes["EVAL_500"];
+        let metrics = labelled(TimingMode::Eval1000, &bands);
+        let stats = &metrics.posture().modes["EVAL_1000"];
         assert_eq!(stats.stddev_us, 0.0, "no dispersion once bounded");
         assert!(
             stats.inference_accuracy < 0.5,
@@ -252,9 +252,9 @@ mod tests {
     #[test]
     fn unvisited_modes_are_absent() {
         let metrics = Metrics::new();
-        metrics.record_turn(TimingMode::Eval500, 500_000, PathLabel::Llm);
+        metrics.record_turn(TimingMode::Eval1000, 1_000_000, PathLabel::Llm);
         let posture = metrics.posture();
-        assert!(posture.modes.contains_key("EVAL_500"));
+        assert!(posture.modes.contains_key("EVAL_1000"));
         assert!(!posture.modes.contains_key("NORMAL"));
         assert!(metrics.samples(TimingMode::Normal).is_empty());
     }
@@ -262,9 +262,9 @@ mod tests {
     #[test]
     fn samples_are_retrievable_per_mode() {
         let metrics = Metrics::new();
-        metrics.record_turn(TimingMode::Eval500, 500_000, PathLabel::Llm);
+        metrics.record_turn(TimingMode::Eval1000, 1_000_000, PathLabel::Llm);
         metrics.record_turn(TimingMode::Normal, 2_000, PathLabel::RegexBlock);
-        assert_eq!(metrics.samples(TimingMode::Eval500), vec![500_000.0]);
+        assert_eq!(metrics.samples(TimingMode::Eval1000), vec![1_000_000.0]);
         assert_eq!(metrics.samples(TimingMode::Normal), vec![2_000.0]);
     }
 }

@@ -1131,7 +1131,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
         let mut b = LogBuilder::new();
         for i in 0..9u64 {
             let path = ["regex_block", "semantic_block", "llm"][(i % 3) as usize];
-            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_500", path, 500_000);
+            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_1000", path, 1_000_000);
         }
         b.push_seal("batch_9", 0);
         b.finish()
@@ -1159,7 +1159,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
         assert_eq!(report.evaluations, 9);
         assert_eq!(report.seals, 1);
         assert_eq!(report.unsealed_evaluations, 0);
-        assert_eq!(report.timing.mode, "EVAL_500");
+        assert_eq!(report.timing.mode, "EVAL_1000");
         assert_eq!(report.timing.distinct_held_us, 1);
         assert_eq!(report.timing.stddev_us, 0.0);
         assert!(report.timing.bounded);
@@ -1198,16 +1198,16 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
 
     #[test]
     fn strict_timing_flags_a_leaky_bounded_log() {
-        // EVAL_500 on paper, but the three stages take different times: the log
+        // EVAL_1000 on paper, but the three stages take different times: the log
         // itself proves the bound was not applied.
         let mut b = LogBuilder::new();
         for i in 0..9u64 {
             let (path, held) = match i % 3 {
-                0 => ("regex_block", 500_000),
-                1 => ("semantic_block", 660_000),
-                _ => ("llm", 840_000),
+                0 => ("regex_block", 1_000_000),
+                1 => ("semantic_block", 1_160_000),
+                _ => ("llm", 1_340_000),
             };
-            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_500", path, held);
+            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_1000", path, held);
         }
         b.push_seal("batch_9", 0);
         let (log, pubkey) = b.finish();
@@ -1220,18 +1220,18 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
 
     #[test]
     fn scheduler_jitter_does_not_break_the_bounded_verdict() {
-        // Real hardware: releasing at a bucket boundary lands on 500ms ±
+        // Real hardware: releasing at a bucket boundary lands on 1000ms ±
         // scheduler jitter, so every sample is a *different* value. They still
         // form one band, so the audit must report `bounded` and strict timing
         // must not false-positive on k-means clustering of pure jitter noise.
         let mut b = LogBuilder::new();
         for i in 0..9u64 {
             let (path, held) = match i % 3 {
-                0 => ("regex_block", 500_000 + i * 13),
-                1 => ("semantic_block", 500_013 - i * 7),
-                _ => ("llm", 500_020 + i * 5),
+                0 => ("regex_block", 1_000_000 + i * 13),
+                1 => ("semantic_block", 1_000_013 - i * 7),
+                _ => ("llm", 1_000_020 + i * 5),
             };
-            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_500", path, held);
+            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_1000", path, held);
         }
         b.push_seal("batch_9", 0);
         let (log, pubkey) = b.finish();
@@ -1243,8 +1243,8 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
         );
         assert!(report.timing.stddev_us > 0.0);
         assert!(
-            report.timing.held_us_max - report.timing.held_us_min < 500,
-            "jitter must stay far below the 500ms bucket"
+            report.timing.held_us_max - report.timing.held_us_min < 1000,
+            "jitter must stay far below the 1000ms bucket"
         );
         assert!(
             report.timing.relative_spread() < BOUNDED_RELATIVE_SPREAD,
@@ -1253,19 +1253,19 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
         );
         assert!(
             report.timing.bounded,
-            "a jittered but bucketed EVAL_500 run is still bounded"
+            "a jittered but bucketed EVAL_1000 run is still bounded"
         );
         assert_eq!(report.evaluations, 9);
     }
 
     #[test]
     fn a_band_that_misses_the_declared_bucket_is_not_bounded() {
-        // Tight single band, but at 300 ms: the declared 500 ms bound was never
+        // Tight single band, but at 600 ms: the declared 1000 ms bound was never
         // applied. Dispersion alone calls this "one band", so the structural
         // window check has to catch it.
         let mut b = LogBuilder::new();
         for i in 0..9u64 {
-            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_500", "llm", 300_000 + i);
+            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_1000", "llm", 600_000 + i);
         }
         b.push_seal("batch_9", 0);
         let (log, pubkey) = b.finish();
@@ -1284,7 +1284,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
 
     #[test]
     fn bucket_us_from_mode_reads_the_declared_bucket() {
-        assert_eq!(bucket_us_from_mode("EVAL_500"), Some(500_000));
+        assert_eq!(bucket_us_from_mode("EVAL_1000"), Some(1_000_000));
         assert_eq!(bucket_us_from_mode("EVAL_1500"), Some(1_500_000));
         assert_eq!(bucket_us_from_mode("NORMAL"), None);
         assert_eq!(bucket_us_from_mode("EVAL_"), None);
@@ -1315,7 +1315,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
         let (log, pubkey) = bounded_log();
         let mut lines: Vec<String> = log.lines().map(|s| s.to_string()).collect();
         // Rewrite the released latency of the *fourth* line (seq 3).
-        lines[3] = lines[3].replace("\"held_us\":500000", "\"held_us\":123456");
+        lines[3] = lines[3].replace("\"held_us\":1000000", "\"held_us\":123456");
         let tampered = lines.join("\n") + "\n";
         let err = verify_str(&tampered, &pubkey, &default_options()).unwrap_err();
         match err {
@@ -1477,7 +1477,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
     fn require_all_sealed_flags_unsealed_evaluations() {
         let mut b = LogBuilder::new();
         for i in 0..3u64 {
-            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_500", "llm", 500_000);
+            b.push_evaluation(&format!("eval_{i:04}"), "EVAL_1000", "llm", 1_000_000);
         }
         // Seal only the first two.
         let leaves: Vec<String> = b
@@ -1553,8 +1553,8 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
     fn environment_drift_mid_log_is_detected() {
         // Two records; the second claims a different kernel.
         let mut b = LogBuilder::new();
-        b.push_evaluation("eval_a", "EVAL_500", "llm", 500_000);
-        let second = b.manifest("eval_b", "EVAL_500");
+        b.push_evaluation("eval_a", "EVAL_1000", "llm", 1_000_000);
+        let second = b.manifest("eval_b", "EVAL_1000");
         let mut line = {
             let record = EvidenceRecord::Evaluation {
                 seq: 1,
@@ -1591,7 +1591,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
             },
             EvaluationEvent::ResponseReleased {
                 evaluation_id: "eval_b".into(),
-                held_us: 500_000,
+                held_us: 1_000_000,
                 frame_bytes: 4096,
                 truncated: false,
                 response_digest: "aa".repeat(32),
@@ -1623,9 +1623,9 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
     #[test]
     fn frame_size_variance_is_detected() {
         let mut b = LogBuilder::new();
-        b.push_evaluation("eval_a", "EVAL_500", "llm", 500_000);
+        b.push_evaluation("eval_a", "EVAL_1000", "llm", 1_000_000);
         // Second evaluation releases a longer frame: observable length leak.
-        let manifest = b.manifest("eval_b", "EVAL_500");
+        let manifest = b.manifest("eval_b", "EVAL_1000");
         let mh = manifest.hash().unwrap();
         let events = vec![
             EvaluationEvent::EvaluationStarted {
@@ -1638,7 +1638,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
             },
             EvaluationEvent::ResponseReleased {
                 evaluation_id: "eval_b".into(),
-                held_us: 500_000,
+                held_us: 1_000_000,
                 frame_bytes: 8192,
                 truncated: false,
                 response_digest: "bb".repeat(32),
@@ -1718,10 +1718,10 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
     fn duplicate_nonce_is_detected() {
         let mut b = LogBuilder::new();
         // Two manifests sharing the same nonce (a reused run identity).
-        let m1 = b.manifest("eval_a", "EVAL_500");
+        let m1 = b.manifest("eval_a", "EVAL_1000");
         let m2 = EvaluationManifest {
             nonce: m1.nonce.clone(),
-            ..b.manifest("eval_b", "EVAL_500")
+            ..b.manifest("eval_b", "EVAL_1000")
         };
         for manifest in [m1, m2] {
             let mh = manifest.hash().unwrap();
@@ -1736,7 +1736,7 @@ audit: {{ require_manifest_signature: true, dual_write_append_log: true }}
                 },
                 EvaluationEvent::ResponseReleased {
                     evaluation_id: manifest.evaluation_id.clone(),
-                    held_us: 500_000,
+                    held_us: 1_000_000,
                     frame_bytes: 4096,
                     truncated: false,
                     response_digest: "cc".repeat(32),

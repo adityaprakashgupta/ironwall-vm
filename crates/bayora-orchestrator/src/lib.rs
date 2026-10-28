@@ -24,6 +24,7 @@ pub mod dashboard;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Configuration for the orchestrator.
@@ -133,7 +134,34 @@ impl Orchestrator {
     /// the Referee HTTP API and turns are run through the same API (Referee
     /// internally routes Blue to LLM with snapshot reset between turns).
     pub async fn run_full_lifecycle(&mut self) -> Result<()> {
-        self.trace.info(trace::TraceStage::ArtifactDownload, "starting full lifecycle", Default::default());
+        tokio::task::block_in_place(|| {
+            self.trace.info(trace::TraceStage::ArtifactDownload, "starting full lifecycle", Default::default());
+
+        // Step 0: Build release binaries needed by later steps (signer, referee, verifier, llm-agent).
+        // Without this, a clean checkout fails when start_referee() or run_verifier() try to execute
+        // binaries that do not yet exist.
+        self.trace.info(
+            trace::TraceStage::ArtifactDownload,
+            "building release binaries",
+            Default::default(),
+        );
+        let build_status = std::process::Command::new("cargo")
+            .arg("build")
+            .arg("--release")
+            .arg("-p").arg("bayora-referee")
+            .arg("-p").arg("bayora-verifier")
+            .arg("-p").arg("bayora-signer")
+            .arg("-p").arg("bayora-llm-engine")
+            .current_dir(&self.config.root_dir)
+            .status()?;
+        if !build_status.success() {
+            return Err(anyhow!("cargo build --release failed"));
+        }
+        self.trace.success(
+            trace::TraceStage::ArtifactDownload,
+            "release binaries built",
+            Default::default(),
+        );
 
         // Clean evidence log from any previous run
         if self.config.evidence_log.exists() {
@@ -154,23 +182,54 @@ impl Orchestrator {
         // Step 3: Start signer
         self.start_signer()?;
 
+        // Give signer a moment to fully initialize its socket before Referee connects
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
         // Step 4: Start Referee
         self.start_referee()?;
 
-        // Step 5: Boot Firecracker MicroVMs (blue + red; Referee owns llm)
-        self.boot_enclave(&[])?;
+        // Brief pause to let Referee fully settle after health check passes
+        std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // Step 6: Create evaluations via Referee API (Red team submits prompts)
+        // Verify referee process is still alive
+        if let Some(ref mut p) = self.referee_proc {
+            match p.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(anyhow::anyhow!(
+                        "Referee process exited unexpectedly with status: {}",
+                        status
+                    ));
+                }
+                Ok(None) => {} // still running
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to check referee process status: {}",
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Step 5: Create evaluations via Referee API (Red team submits prompts)
         let evaluations = self.create_evaluations()?;
+
+        // Step 6: Boot Firecracker MicroVMs (blue + red; Referee owns llm)
+        self.boot_enclave(&evaluations)?;
+
+        // Give Blue VM time to fully boot and start listening on vsock
+        std::thread::sleep(std::time::Duration::from_secs(5));
 
         // Step 7: Run turns via HTTP API (Referee routes Blue -> LLM internally)
         self.run_turns_http(&evaluations)?;
 
-        // Step 8: Seal batch
+        // Step 8: Wait for all evaluations to complete in the evidence log
+        self.wait_for_completion(&evaluations)?;
+
+        // Step 9: Seal batch
         self.seal_batch()?;
 
-        // Step 9: Verify (without strict-timing which is too strict for this hardware)
-        let verified = self.run_verifier(false)?;
+        // Step 10: Verify (strict timing + require all sealed, consistent with `evaluate` subcommand)
+        let verified = self.run_verifier(true)?;
 
         self.trace.success(
             trace::TraceStage::Verification,
@@ -188,6 +247,7 @@ impl Orchestrator {
         } else {
             Err(anyhow!("verifier returned INVALID"))
         }
+        })
     }
 
     /// Run turns via Referee HTTP API.
@@ -218,11 +278,33 @@ impl Orchestrator {
                 "prompt": eval.prompt
             });
 
-            let resp: serde_json::Value = client
+            let resp = client
                 .post(format!("http://{}/v1/evaluations/{}/turns", self.config.referee_listen, eval.eval_id))
                 .json(&body)
-                .send()?
-                .json()?;
+                .send();
+
+            let resp = match resp {
+                Ok(resp) if resp.status().is_success() => resp,
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body_text = resp.text().unwrap_or_default();
+                    return Err(anyhow!(
+                        "turn failed for {}: {} {}",
+                        eval.eval_id, status, body_text
+                    ));
+                }
+                Err(e) => {
+                    // Check if Firecracker for Blue is still running
+                    let fc_still_alive = std::os::unix::net::UnixStream::connect(&self.config.runtime_dir.join("fc-blue.sock")).is_ok();
+                    return Err(anyhow!(
+                        "turn failed for {}: connection error ({}). Blue VM Firecracker still running: {}. \
+                         Check Referee log for details.",
+                        eval.eval_id, e, fc_still_alive
+                    ));
+                }
+            };
+
+            let resp: serde_json::Value = resp.json()?;
 
             let path = resp.get("telemetry")
                 .and_then(|t| t.get("path"))
@@ -332,6 +414,8 @@ impl Orchestrator {
 
     fn start_referee(&mut self) -> Result<()> {
         self.trace.info(trace::TraceStage::MicroVMBoot, "starting Referee", Default::default());
+        let referee_log = std::fs::File::create(self.config.runtime_dir.join("referee.log"))
+            .expect("failed to create referee log");
         let mut cmd = std::process::Command::new(self.config.root_dir.join("target/release/bayora-referee"));
         cmd.arg("--policy").arg(&self.config.policy_path)
             .arg("--images").arg(&self.config.images_json)
@@ -349,8 +433,8 @@ impl Orchestrator {
             // Capability TTL must exceed VM boot time (~60s); 5 minutes gives margin
             .arg("--capability-ttl-ms").arg("300000")
             .current_dir(&self.config.root_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdout(referee_log.try_clone().unwrap())
+            .stderr(referee_log);
 
         let child = cmd.spawn()?;
         self.referee_proc = Some(child);
@@ -388,15 +472,36 @@ impl Orchestrator {
 
         let mut evaluations = Vec::new();
         for (prompt, expected) in prompts {
-            let client = reqwest::blocking::Client::new();
-            let resp: serde_json::Value = client
-                .post(format!("http://{}/v1/evaluations", self.config.referee_listen))
-                .json(&serde_json::json!({}))
-                .send()?
-                .json()?;
+            // Retry creating evaluation in case Referee is still starting up
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut eval_id: Option<String> = None;
+            let mut capability: Option<serde_json::Value> = None;
+            for _ in 0..10 {
+                let client = reqwest::blocking::Client::new();
+                match client
+                    .post(format!("http://{}/v1/evaluations", self.config.referee_listen))
+                    .json(&serde_json::json!({}))
+                    .send()
+                {
+                    Ok(resp) => {
+                        let parsed: serde_json::Value = resp.json().unwrap_or(serde_json::json!({}));
+                        eval_id = Some(parsed["evaluation_id"].as_str().unwrap_or("unknown").to_string());
+                        capability = parsed.get("capability").cloned();
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e.into());
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+            }
 
-            let eval_id = resp["evaluation_id"].as_str().unwrap_or("unknown").to_string();
-            let capability = resp.get("capability").cloned().unwrap_or(serde_json::Value::Null);
+            let eval_id = eval_id.ok_or_else(|| {
+                last_err.unwrap_or_else(|| anyhow::anyhow!("failed to create evaluation after retries"))
+            })?;
+            let capability = capability.ok_or_else(|| {
+                anyhow::anyhow!("failed to create evaluation after retries (no capability)")
+            })?;
 
             self.evaluations_created.push(EvaluationRef {
                 eval_id: eval_id.clone(),
@@ -428,55 +533,38 @@ impl Orchestrator {
         Ok(evaluations)
     }
 
-    fn boot_enclave(&mut self, evaluations: &[EvaluationRef]) -> Result<()> {
-        self.trace.info(trace::TraceStage::MicroVMBoot, "booting Firecracker MicroVMs", Default::default());
+    fn boot_enclave(&mut self, _evaluations: &[EvaluationRef]) -> Result<()> {
+        self.trace.info(trace::TraceStage::MicroVMBoot, "booting Firecracker MicroVMs directly", Default::default());
 
-        // Write task file for Red VM
-        let task = serde_json::json!({
-            "host_cid": 2,
-            "vsock_port": self.config.vsock_port,
-            "evaluations": evaluations.iter().map(|e| serde_json::json!({
-                "eval_id": e.eval_id,
-                "capability": e.capability,
-                "prompts": [e.prompt]
-            })).collect::<Vec<_>>()
-        });
+        fs::create_dir_all(&self.config.runtime_dir)?;
 
-        let task_path = self.config.runtime_dir.join("red-task.json");
-        std::fs::write(&task_path, serde_json::to_string_pretty(&task)?)?;
-
-        self.trace.success(
-            trace::TraceStage::MicroVMBoot,
-            "task file written",
-            {
-                let mut m = std::collections::BTreeMap::new();
-                m.insert("path".into(), task_path.display().to_string().into());
-                m.insert("evaluations".into(), evaluations.len().into());
-                m
-            },
-        );
-
-        // Boot enclave via boot_enclave.sh
-        let mut cmd = std::process::Command::new("sudo");
-        cmd.env("FIRECRACKER", &self.config.firecracker_bin)
-            .arg(self.config.root_dir.join("microvm/boot_enclave.sh"))
-            .arg("--kernel").arg(&self.config.kernel_path)
-            .arg("--task").arg(&task_path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let child = cmd.spawn()?;
-        self.boot_proc = Some(child);
-
-        // Wait for vsock sockets
-        for _ in 0..120 {
-            let blue_exists = self.config.runtime_dir.join("blue.vsock").exists();
-            let red_exists = self.config.runtime_dir.join("red.vsock").exists();
-            if blue_exists && red_exists {
-                break;
+        // Clean stale sockets and config files from previous runs
+        for entry in fs::read_dir(&self.config.runtime_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".sock") || name_str.ends_with(".vsock") || name_str.ends_with(".pid") || name_str.ends_with(".json") {
+                let _ = fs::remove_file(entry.path());
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
         }
+
+        // Boot blue VM (CID 4) via direct Firecracker management.
+        // No shell script, no vsock probe, no cleanup trap that could kill Firecracker.
+        // Turns are driven via Referee HTTP API, so Red VM is not needed here.
+        microvm::boot_single_vm(
+            &self.trace,
+            "blue",
+            4,
+            9001,
+            &self.config.kernel_path,
+            &self.config.images_dir.join("blue.ext4"),
+            &self.config.runtime_dir,
+            &self.config.firecracker_bin,
+            self.config.mem_mib,
+            self.config.vcpus,
+            None,
+            "",
+        )?;
 
         self.trace.success(
             trace::TraceStage::MicroVMBoot,
@@ -484,12 +572,12 @@ impl Orchestrator {
             {
                 let mut m = std::collections::BTreeMap::new();
                 m.insert("blue_vsock".into(), self.config.runtime_dir.join("blue.vsock").display().to_string().into());
-                m.insert("red_vsock".into(), self.config.runtime_dir.join("red.vsock").display().to_string().into());
                 m
             },
         );
         Ok(())
     }
+
 
     fn wait_for_completion(&self, evaluations: &[EvaluationRef]) -> Result<()> {
         self.trace.info(trace::TraceStage::Evaluation, "waiting for Red to complete all evaluations", Default::default());

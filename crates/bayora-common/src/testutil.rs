@@ -38,7 +38,7 @@ pub fn policy() -> PolicyConfig {
     PolicyConfig::from_yaml(
         r#"
 policy_version: "2026.10.v3"
-evaluation: { timing_mode: "EVAL_500", response_frame_bytes: 4096, max_prompt_bytes: 8192, max_tokens: 64 }
+evaluation: { timing_mode: "EVAL_1000", response_frame_bytes: 4096, max_prompt_bytes: 8192, max_tokens: 64 }
 network: { red_to_blue: "MEDIATED", red_to_llm: "MEDIATED", blue_to_red: "DENIED" }
 state: { reset_policy: "SNAPSHOT", cache_prompt: false }
 resources:

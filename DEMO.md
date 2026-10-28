@@ -130,8 +130,8 @@ Referee Posture:
   Batch seals: 1
   Last verification: VALID (5 evaluations, 1 seal)
 
-Timing Bands (EVAL_500 — constant release):
-  EVAL_500        samples=5   mean=500974µs  stddev=185µs  inf_acc=20.0%
+Timing Bands (EVAL_1000 — constant release):
+  EVAL_1000        samples=5   mean=1000974µs  stddev=185µs  inf_acc=20.0%
 
 Evaluation Lifecycle (last 6):
   ● eval_01a170aa-aeba  LLM (allowed)          held=500825µs reset=45000µs  "What is the capital of France?"
@@ -170,7 +170,7 @@ Evidence Log (evidence_log.ndjson):
 
 1. **Show 3 Firecracker processes running**: `pgrep -a firecracker` → red, blue, llm
 2. **Show blocked prompts are indistinguishable**: regex_block and semantic_block both return identical 4096-byte frames
-3. **Show timing is constant**: All responses released at ~500ms (EVAL_500), so timing can't leak the defence stage
+3. **Show timing is constant**: All responses released at ~1000ms (EVAL_1000), so timing can't leak the defence stage
 4. **Show Verifier returns VALID**: Independent re-derivation of the Merkle chain
 5. **Show evidence log is append-only**: NDJSON, never modified in place
 

@@ -207,7 +207,7 @@ VALID
   unsealed      : 0
   chain head    : 4ab2c0…
   trust anchor  : 1f0e…
-  timing        : EVAL_500 - 9 sample(s), held 500918..501742us, stddev 301us (0.0602% of mean), inference accuracy 0.33 (bounded)
+  timing        : EVAL_1000 - 9 sample(s), held 1000918..1001742us, stddev 301us (0.0602% of mean), inference accuracy 0.33 (bounded)
 ```
 
 Sample failure output (pinpointed, exit 1):
