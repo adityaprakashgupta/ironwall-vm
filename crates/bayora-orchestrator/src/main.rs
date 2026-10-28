@@ -289,19 +289,11 @@ async fn cmd_full(
 
             // Clean stale socket/pid files from previous runs so all VMs
             // show STOPPED initially, not leftover state.
-            if let Ok(entries) = std::fs::read_dir(&config.runtime_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.ends_with(".vsock")
-                        || name_str.ends_with(".sock")
-                        || name_str.ends_with(".pid")
-                        || name_str.ends_with(".json")
-                    {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
+            // Use sudo rm via sh -c so glob patterns are expanded by the shell.
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sudo -n rm -f /run/bayora/*.vsock /run/bayora/*.vsock_* /run/bayora/*.sock /run/bayora/*.pid")
+                .status();
 
             // Clone the config (owned) so both threads can use it independently.
             let config_clone = (*config).clone();
@@ -338,38 +330,75 @@ async fn cmd_full(
 
             // Kill any lingering Firecracker processes so all VMs show STOPPED
             // and no Firecracker processes remain running after evaluation.
+            // Try user-owned first, then root-owned via sudo.
+            let _ = std::process::Command::new("pkill")
+                .arg("-9")
+                .arg("firecracker")
+                .status();
             let _ = std::process::Command::new("sudo")
-                .arg("pkill")
+                .arg("-n")
+                .arg("killall")
                 .arg("-9")
                 .arg("firecracker")
                 .status();
 
             // Kill any lingering Referee processes.
+            let _ = std::process::Command::new("pkill")
+                .arg("-9")
+                .arg("-f")
+                .arg("bayora-referee")
+                .status();
             let _ = std::process::Command::new("sudo")
-                .arg("pkill")
+                .arg("-n")
+                .arg("killall")
                 .arg("-9")
                 .arg("-f")
                 .arg("bayora-referee")
                 .status();
 
             // Clean up socket files so the dashboard shows all VMs STOPPED.
-            if let Ok(entries) = std::fs::read_dir(&config.runtime_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.ends_with(".vsock")
-                        || name_str.ends_with(".sock")
-                        || name_str.ends_with(".pid")
-                    {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
+            // Use sudo rm via sh -c so glob patterns are expanded by the shell.
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sudo -n rm -f /run/bayora/*.vsock /run/bayora/*.vsock_* /run/bayora/*.sock /run/bayora/*.pid")
+                .status();
 
             Ok(dashboard_result)
         } else {
             let mut orchestrator = Orchestrator::new(config.clone())?;
             orchestrator.run_full_lifecycle().await?;
+
+            // Kill any lingering Firecracker processes after evaluation.
+            let _ = std::process::Command::new("pkill")
+                .arg("-9")
+                .arg("firecracker")
+                .status();
+            let _ = std::process::Command::new("sudo")
+                .arg("-n")
+                .arg("killall")
+                .arg("-9")
+                .arg("firecracker")
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .arg("-9")
+                .arg("-f")
+                .arg("bayora-referee")
+                .status();
+            let _ = std::process::Command::new("sudo")
+                .arg("-n")
+                .arg("killall")
+                .arg("-9")
+                .arg("-f")
+                .arg("bayora-referee")
+                .status();
+
+            // Clean up socket files so all VMs show STOPPED.
+            // Use sudo rm via sh -c so glob patterns are expanded by the shell.
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sudo -n rm -f /run/bayora/*.vsock /run/bayora/*.vsock_* /run/bayora/*.sock /run/bayora/*.pid")
+                .status();
+
             Ok(())
         }
     }
@@ -381,16 +410,34 @@ async fn cmd_full(
         orchestrator.run_full_lifecycle().await?;
 
         // Kill any lingering Firecracker processes after evaluation.
-        let _ = std::process::Command::new("sudo")
-            .arg("pkill")
+        let _ = std::process::Command::new("pkill")
             .arg("-9")
             .arg("firecracker")
             .status();
         let _ = std::process::Command::new("sudo")
-            .arg("pkill")
+            .arg("-n")
+            .arg("killall")
+            .arg("-9")
+            .arg("firecracker")
+            .status();
+        let _ = std::process::Command::new("pkill")
             .arg("-9")
             .arg("-f")
             .arg("bayora-referee")
+            .status();
+        let _ = std::process::Command::new("sudo")
+            .arg("-n")
+            .arg("killall")
+            .arg("-9")
+            .arg("-f")
+            .arg("bayora-referee")
+            .status();
+
+        // Clean up socket files so all VMs show STOPPED.
+        // Use sudo rm via sh -c so glob patterns are expanded by the shell.
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sudo -n rm -f /run/bayora/*.vsock /run/bayora/*.vsock_* /run/bayora/*.sock /run/bayora/*.pid")
             .status();
 
         Ok(())
