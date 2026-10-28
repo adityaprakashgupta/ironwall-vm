@@ -375,7 +375,7 @@ async fn cmd_full(
                 .status();
             let _ = std::process::Command::new("sudo")
                 .arg("-n")
-                .arg("killall")
+                .arg("pkill")
                 .arg("-9")
                 .arg("firecracker")
                 .status();
@@ -386,7 +386,7 @@ async fn cmd_full(
                 .status();
             let _ = std::process::Command::new("sudo")
                 .arg("-n")
-                .arg("killall")
+                .arg("pkill")
                 .arg("-9")
                 .arg("-f")
                 .arg("bayora-referee")

@@ -394,12 +394,15 @@ impl Orchestrator {
 
     fn start_signer(&mut self) -> Result<()> {
         self.trace.info(trace::TraceStage::MicroVMBoot, "starting signer daemon", Default::default());
-        let mut cmd = std::process::Command::new("cargo");
-        cmd.arg("run")
-            .arg("-p")
-            .arg("bayora-signer")
-            .arg("--")
-            .arg("--key-dir")
+        let signer_bin = self.config.root_dir.join("target/release/bayora-signer");
+        if !signer_bin.exists() {
+            return Err(anyhow!(
+                "signer release binary not found at {}; run cargo build --release first",
+                signer_bin.display()
+            ));
+        }
+        let mut cmd = std::process::Command::new(&signer_bin);
+        cmd.arg("--key-dir")
             .arg(self.config.root_dir.join("keys"))
             .arg("--listen")
             .arg(format!("unix:{}", self.config.signer_sock.display()))
