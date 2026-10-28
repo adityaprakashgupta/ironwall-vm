@@ -69,6 +69,9 @@ enum Commands {
         /// Skip golden snapshot
         #[arg(long)]
         skip_golden: bool,
+        /// Launch TUI dashboard alongside the lifecycle (requires --feature tui)
+        #[arg(long, default_value = "false")]
+        dashboard: bool,
     },
     /// Launch the TUI dashboard (requires --feature tui)
     #[cfg(feature = "tui")]
@@ -122,8 +125,8 @@ async fn main() -> Result<()> {
         Commands::Evaluate => {
             cmd_evaluate(&trace, &config).await?;
         }
-        Commands::Full { skip_golden } => {
-            cmd_full(&trace, &config, skip_golden).await?;
+        Commands::Full { skip_golden, dashboard } => {
+            cmd_full(&trace, &config, skip_golden, dashboard).await?;
         }
         #[cfg(feature = "tui")]
         Commands::Dashboard { refresh_ms } => {
@@ -260,14 +263,57 @@ async fn cmd_evaluate(trace: &Trace, config: &OrchestratorConfig) -> Result<()> 
     }
 
 /// Run the full lifecycle.
+///
+/// When `--feature tui` is enabled and `--dashboard` is passed, the lifecycle
+/// runs in a background thread while the ratatui dashboard displays live
+/// progress on the main thread. The dashboard auto-exits when the Independent
+/// Verifier produces a result (VALID / INVALID).
 async fn cmd_full(
     _trace: &Trace,
     config: &OrchestratorConfig,
-    _skip_golden: bool,
+    skip_golden: bool,
+    dashboard: bool,
 ) -> Result<()> {
-    let mut orchestrator = Orchestrator::new(config.clone())?;
-    orchestrator.run_full_lifecycle().await?;
-    Ok(())
+    #[cfg(feature = "tui")]
+    {
+        if dashboard {
+            let config_clone = config.clone();
+
+            // Run the lifecycle in a background thread so the dashboard can
+            // display live progress on the main thread.
+            let lifecycle_thread = std::thread::spawn(move || -> Result<()> {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(async {
+                    let mut orchestrator = Orchestrator::new(config_clone.clone())?;
+                    orchestrator.run_full_lifecycle().await
+                })
+            });
+
+            // Dashboard runs on the main thread and auto-exits when the
+            // verifier produces a result (VALID or INVALID).
+            let _dashboard_result = dashboard::run_dashboard(config, 500);
+
+            // Wait for the lifecycle to finish (it should be done by now).
+            let lifecycle_result = lifecycle_thread.join().map_err(|e| {
+                anyhow::anyhow!("lifecycle thread panicked: {:?}", e)
+            })?;
+            lifecycle_result?;
+
+            Ok(())
+        } else {
+            let mut orchestrator = Orchestrator::new(config.clone())?;
+            orchestrator.run_full_lifecycle().await?;
+            Ok(())
+        }
+    }
+
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = dashboard;
+        let mut orchestrator = Orchestrator::new(config.clone())?;
+        orchestrator.run_full_lifecycle().await?;
+        Ok(())
+    }
 }
 
 /// Launch the TUI dashboard.
