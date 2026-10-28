@@ -116,8 +116,10 @@ impl Trace {
             }
         }
         // Also print to stderr for visibility (unless suppressed during TUI dashboard mode).
+        // Use \r (carriage return) to reset cursor to column 0 before each line,
+        // preventing padding when subprocess output leaves cursor at non-zero position.
         if !SUPPRESS_STDERR_TRACE.load(Ordering::SeqCst) {
-            eprintln!("[{}] {} {} {}", record.timestamp.format("%H:%M:%S%.3f"), level_label, stage_label, event);
+            eprint!("\r[{}] {} {} {}\n", record.timestamp.format("%H:%M:%S%.3f"), level_label, stage_label, event);
         }
     }
 
