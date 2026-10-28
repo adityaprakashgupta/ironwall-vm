@@ -342,13 +342,7 @@ fn run_dashboard_loop(
             }
         }
 
-        // Auto-quit when verifier has produced a result so judges see VALID/INVALID.
-        let state = load_state(&config.trace_log, &config.evidence_log);
-        if state.verifier_result.is_some() {
-            terminal.draw(|f| draw_ui(f, &state))?;
-            thread::sleep(Duration::from_secs(4));
-            break;
-        }
+        let _state = load_state(&config.trace_log, &config.evidence_log);
     }
 
     Ok(())

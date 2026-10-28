@@ -19,6 +19,8 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(name = "bayora-orchestrator", about = "Bayora Enclave full lifecycle orchestrator")]
@@ -280,29 +282,40 @@ async fn cmd_full(
             // Suppress stderr trace echo so crossterm has exclusive terminal control.
             trace::suppress_stderr_trace(true);
 
-            let config_clone = config.clone();
+            // Clone the config (owned) so both threads can use it independently.
+            let config_clone = (*config).clone();
+            let lifecycle_config = config_clone.clone();
 
-            // Run the lifecycle in a background thread so the dashboard can
-            // display live progress on the main thread.
+            // Start the dashboard first so judges can see the initial state
+            // (empty pipeline, pending VMs) before the lifecycle begins.
+            let dashboard_handle = std::thread::spawn(move || -> Result<()> {
+                dashboard::run_dashboard(&config_clone, 500)
+            });
+
+            // Brief pause so the initial dashboard state is visible.
+            thread::sleep(Duration::from_secs(2));
+
+            // Run the lifecycle in a background thread while dashboard shows live progress.
             let lifecycle_thread = std::thread::spawn(move || -> Result<()> {
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async {
-                    let mut orchestrator = Orchestrator::new(config_clone.clone())?;
+                    let mut orchestrator = Orchestrator::new(lifecycle_config)?;
                     orchestrator.run_full_lifecycle().await
                 })
             });
 
-            // Dashboard runs on the main thread and auto-exits when the
-            // verifier produces a result (VALID or INVALID).
-            let _dashboard_result = dashboard::run_dashboard(config, 500);
+            // Wait for dashboard to finish (user presses 'q' to quit).
+            let dashboard_result = dashboard_handle.join().map_err(|e| {
+                anyhow::anyhow!("dashboard thread panicked: {:?}", e)
+            })??;
 
-            // Wait for the lifecycle to finish (it should be done by now).
+            // Wait for lifecycle to finish.
             let lifecycle_result = lifecycle_thread.join().map_err(|e| {
                 anyhow::anyhow!("lifecycle thread panicked: {:?}", e)
             })?;
             lifecycle_result?;
 
-            Ok(())
+            Ok(dashboard_result)
         } else {
             let mut orchestrator = Orchestrator::new(config.clone())?;
             orchestrator.run_full_lifecycle().await?;
