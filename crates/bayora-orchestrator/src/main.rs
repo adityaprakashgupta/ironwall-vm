@@ -287,6 +287,22 @@ async fn cmd_full(
             let _ = std::fs::remove_file(&config.trace_log);
             let _ = std::fs::remove_file(&config.evidence_log);
 
+            // Clean stale socket/pid files from previous runs so all VMs
+            // show STOPPED initially, not leftover state.
+            if let Ok(entries) = std::fs::read_dir(&config.runtime_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.ends_with(".vsock")
+                        || name_str.ends_with(".sock")
+                        || name_str.ends_with(".pid")
+                        || name_str.ends_with(".json")
+                    {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+
             // Clone the config (owned) so both threads can use it independently.
             let config_clone = (*config).clone();
             let lifecycle_config = config_clone.clone();
