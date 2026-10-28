@@ -139,23 +139,41 @@ impl Orchestrator {
 
         // Step 0: Build release binaries needed by later steps (signer, referee, verifier, llm-agent).
         // Without this, a clean checkout fails when start_referee() or run_verifier() try to execute
-        // binaries that do not yet exist.
+        // binaries that do not yet already exist.
         self.trace.info(
             trace::TraceStage::ArtifactDownload,
             "building release binaries",
             Default::default(),
         );
-        let build_status = std::process::Command::new("cargo")
-            .arg("build")
-            .arg("--release")
-            .arg("-p").arg("bayora-referee")
-            .arg("-p").arg("bayora-verifier")
-            .arg("-p").arg("bayora-signer")
-            .arg("-p").arg("bayora-llm-engine")
-            .current_dir(&self.config.root_dir)
-            .status()?;
-        if !build_status.success() {
-            return Err(anyhow!("cargo build --release failed"));
+
+        // Skip cargo build if release binaries already exist (avoids cargo output
+        // flooding the terminal during TUI dashboard mode).
+        let release_dir = self.config.root_dir.join("target/release");
+        let binaries_exist = [
+            "bayora-referee",
+            "bayora-verifier",
+            "bayora-signer",
+        ]
+        .iter()
+        .all(|b| release_dir.join(b).exists());
+
+        if !binaries_exist {
+            let mut build_cmd = std::process::Command::new("cargo");
+            build_cmd
+                .arg("build")
+                .arg("--release")
+                .arg("-p").arg("bayora-referee")
+                .arg("-p").arg("bayora-verifier")
+                .arg("-p").arg("bayora-signer")
+                .arg("-p").arg("bayora-llm-engine")
+                .current_dir(&self.config.root_dir);
+            // Redirect cargo output to avoid flooding the terminal during TUI dashboard mode.
+            build_cmd.stdout(std::process::Stdio::null());
+            build_cmd.stderr(std::process::Stdio::null());
+            let build_status = build_cmd.status()?;
+            if !build_status.success() {
+                return Err(anyhow!("cargo build --release failed"));
+            }
         }
         self.trace.success(
             trace::TraceStage::ArtifactDownload,
