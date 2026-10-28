@@ -11,7 +11,16 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
+
+/// When true, suppress the stderr echo of trace records (used during TUI dashboard mode
+/// so crossterm has exclusive terminal control).
+static SUPPRESS_STDERR_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// Suppress stderr echo of trace records.
+pub fn suppress_stderr_trace(suppress: bool) {
+    SUPPRESS_STDERR_TRACE.store(suppress, Ordering::SeqCst);
+}
 
 /// A single trace record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +115,10 @@ impl Trace {
                 let _ = w.flush();
             }
         }
-        // Also print to stderr for visibility
-        eprintln!("[{}] {} {} {}", record.timestamp.format("%H:%M:%S%.3f"), level_label, stage_label, event);
+        // Also print to stderr for visibility (unless suppressed during TUI dashboard mode).
+        if !SUPPRESS_STDERR_TRACE.load(Ordering::SeqCst) {
+            eprintln!("[{}] {} {} {}", record.timestamp.format("%H:%M:%S%.3f"), level_label, stage_label, event);
+        }
     }
 
     pub fn info(&self, stage: TraceStage, event: &str, data: BTreeMap<String, serde_json::Value>) {

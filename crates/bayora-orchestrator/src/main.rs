@@ -277,6 +277,9 @@ async fn cmd_full(
     #[cfg(feature = "tui")]
     {
         if dashboard {
+            // Suppress stderr trace echo so crossterm has exclusive terminal control.
+            trace::suppress_stderr_trace(true);
+
             let config_clone = config.clone();
 
             // Run the lifecycle in a background thread so the dashboard can
