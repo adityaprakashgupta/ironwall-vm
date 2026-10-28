@@ -282,6 +282,11 @@ async fn cmd_full(
             // Suppress stderr trace echo so crossterm has exclusive terminal control.
             trace::suppress_stderr_trace(true);
 
+            // Clean trace and evidence logs from any previous run so the
+            // dashboard doesn't show stale data.
+            let _ = std::fs::remove_file(&config.trace_log);
+            let _ = std::fs::remove_file(&config.evidence_log);
+
             // Clone the config (owned) so both threads can use it independently.
             let config_clone = (*config).clone();
             let lifecycle_config = config_clone.clone();

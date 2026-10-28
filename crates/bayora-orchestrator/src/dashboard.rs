@@ -3,7 +3,7 @@
 //! Judge-facing live demo view showing:
 //!   * Pipeline stages (ArtifactDownload → ImageBuild → MicroVMBoot →
 //!     Evaluation → Reset → Evidence → Verification)
-//!   * Firecracker MicroVM states (Red, Blue, LLM) with CID, vsock, status
+//!   * Firecracker MicroVM states (Blue orchestrator-managed, Red/LLM Referee-managed)
 //!   * Prompt lifecycle table (prompt → verdict → LLM response)
 //!   * Merkle tree evidence visualization
 //!   * Independent Verifier result (VALID / INVALID)
@@ -37,8 +37,12 @@ const PIPELINE_STAGES: [&str; 7] = [
     "VERIFICATION",
 ];
 
-/// VM roles displayed.
-const VMS: [(&str, u32); 3] = [("red", 3), ("blue", 4), ("llm", 5)];
+/// VM roles — only Blue is orchestrator-managed; Red/LLM are Referee-managed.
+const VMS: [(&str, u32, &str); 3] = [
+    ("red", 3, "Referee-managed"),
+    ("blue", 4, "Orchestrator-booted"),
+    ("llm", 5, "Referee-managed"),
+];
 
 /// Poll interval for re-reading trace / evidence logs.
 const POLL_MS: u64 = 500;
@@ -52,8 +56,8 @@ struct DashboardState {
     current_stage: Option<usize>,
     /// Stage index → (level, event).
     stage_events: HashMap<usize, (TraceLevel, String)>,
-    /// VM name → (running, socket_path).
-    vms: HashMap<String, (bool, Option<String>)>,
+    /// VM name → (running, socket_path, manager).
+    vms: HashMap<String, (bool, Option<String>, &'static str)>,
     /// Evaluation rows for the prompt lifecycle table.
     evaluations: Vec<EvalRow>,
     /// Merkle root hash.
@@ -64,6 +68,8 @@ struct DashboardState {
     verifier_result: Option<String>,
     /// Recent trace records.
     recent_trace: Vec<TraceRecord>,
+    /// eval_id → prompt text (from trace log).
+    prompts: HashMap<String, String>,
 }
 
 /// A single evaluation row.
@@ -102,11 +108,20 @@ fn load_state(trace_log: &Path, evidence_log: &Path) -> DashboardState {
             state.stage_events.insert(idx, (record.level.clone(), record.event.clone()));
         }
 
-        // VM boot states from MicroVMBoot stage.
+        // VM boot states from MicroVMBoot stage (only Blue is orchestrator-booted).
         if stage == TraceStage::MicroVMBoot {
             if let Some(role) = record.data.get("role").and_then(|v| v.as_str()) {
                 if let Some(vsock) = record.data.get("vsock_uds").and_then(|v| v.as_str()) {
-                    state.vms.insert(role.to_string(), (true, Some(vsock.to_string())));
+                    state.vms.insert(role.to_string(), (true, Some(vsock.to_string()), "Orchestrator-booted"));
+                }
+            }
+        }
+
+        // Extract eval_id → prompt from "evaluation created" trace events.
+        if stage == TraceStage::Evaluation && record.event == "evaluation created" {
+            if let Some(eid) = record.data.get("eval_id").and_then(|v| v.as_str()) {
+                if let Some(prompt) = record.data.get("prompt").and_then(|v| v.as_str()) {
+                    state.prompts.insert(eid.to_string(), prompt.to_string());
                 }
             }
         }
@@ -139,14 +154,6 @@ fn load_state(trace_log: &Path, evidence_log: &Path) -> DashboardState {
                 .unwrap_or("unknown")
                 .to_string();
 
-            let prompt = events
-                .and_then(|arr| {
-                    arr.iter().find(|e| e.get("event_type") == Some(&Value::String("prompt_routed".into())))
-                })
-                .and_then(|e| e.get("prompt").and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .to_string();
-
             let path = events
                 .and_then(|arr| {
                     arr.iter().find(|e| e.get("event_type") == Some(&Value::String("prompt_routed".into())))
@@ -160,6 +167,8 @@ fn load_state(trace_log: &Path, evidence_log: &Path) -> DashboardState {
                     arr.iter().find(|e| e.get("event_type") == Some(&Value::String("response_released".into())))
                 })
                 .and_then(|e| e.get("held_us").and_then(|v| v.as_u64()));
+
+            let prompt = state.prompts.get(&eval_id).cloned().unwrap_or_default();
 
             state.evaluations.push(EvalRow {
                 eval_id_short: eval_id.chars().take(8).collect::<String>(),
@@ -341,8 +350,6 @@ fn run_dashboard_loop(
                 }
             }
         }
-
-        let _state = load_state(&config.trace_log, &config.evidence_log);
     }
 
     Ok(())
@@ -413,9 +420,10 @@ fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState) {
         .block(Block::default().borders(Borders::ALL).title("Pipeline Stages"));
     f.render_widget(pipeline, left_chunks[0]);
 
-    // VM states panel.
-    let vm_items: Vec<ListItem> = VMS.iter().map(|(name, cid)| {
-        let (running, socket) = state.vms.get(*name).unwrap_or(&(false, None));
+    // VM states panel — only Blue is orchestrator-booted; Red/LLM are Referee-managed.
+    let vm_items: Vec<ListItem> = VMS.iter().map(|(name, cid, manager)| {
+        let default_vm = (false, None, *manager);
+        let (running, socket, _) = state.vms.get(*name).unwrap_or(&default_vm);
         let status = if *running { "RUNNING" } else { "STOPPED" };
         let style = if *running {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
@@ -427,6 +435,7 @@ fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState) {
             Span::styled(format!("{name:>4} (CID {cid})  "), Style::default().fg(Color::Gray)),
             Span::styled(status, style),
             Span::styled(format!("  [{sock_str}]"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("  ({manager})"), Style::default().fg(Color::DarkGray)),
         ]))
     }).collect();
     let vm_list = List::new(vm_items)
