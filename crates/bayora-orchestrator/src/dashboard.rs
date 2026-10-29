@@ -393,7 +393,7 @@ fn draw_ui(f: &mut ratatui::Frame, state: &DashboardState, runtime_dir: &Path, v
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    "Bayora Enclave v3.0 — Pipeline {:.0}% complete",
+                    "IronWall-VM v0.1.0 — Pipeline {:.0}% complete",
                     progress * 100.0
                 )),
         )
