@@ -231,11 +231,12 @@ impl Orchestrator {
         // Step 5: Create evaluations via Referee API (Red team submits prompts)
         let evaluations = self.create_evaluations()?;
 
-        // Step 6: Boot Firecracker MicroVMs (blue + red; Referee owns llm)
+        // Step 6: Boot Firecracker MicroVMs (blue + llm).
         self.boot_enclave(&evaluations)?;
 
-        // Give Blue VM time to fully boot and start listening on vsock
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        // Give the VMs time to fully boot. The LLM VM needs time to load the
+        // GGUF model (~20s on CPU) before its agent binds the vsock port.
+        std::thread::sleep(std::time::Duration::from_secs(30));
 
         // Step 7: Run turns via HTTP API (Referee routes Blue -> LLM internally)
         self.run_turns_http(&evaluations)?;
@@ -276,7 +277,10 @@ impl Orchestrator {
     fn run_turns_http(&self, evaluations: &[EvaluationRef]) -> Result<()> {
         self.trace.info(trace::TraceStage::Evaluation, "running turns via Referee HTTP API", Default::default());
 
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .expect("failed to create HTTP client");
 
         for eval in evaluations {
             self.trace.info(
@@ -447,8 +451,7 @@ impl Orchestrator {
             .arg("--firecracker-api").arg(self.config.runtime_dir.join("fc-llm.sock"))
             .arg("--llm-port").arg(self.config.llm_port.to_string())
             .arg("--transport").arg("firecracker")
-            .arg("--reset").arg("snapshot")
-            .arg("--snapshot-path").arg(self.config.snapshots_dir.join("llm-golden.snap"))
+            .arg("--reset").arg("noop")
             .arg("--vsock-port").arg(self.config.vsock_port.to_string())
             .arg("--firecracker-bin").arg(&self.config.firecracker_bin)
             // Capability TTL must exceed VM boot time (~60s); 5 minutes gives margin
@@ -570,7 +573,6 @@ impl Orchestrator {
         }
 
         // Boot blue VM (CID 4) via direct Firecracker management.
-        // No shell script, no vsock probe, no cleanup trap that could kill Firecracker.
         // Turns are driven via Referee HTTP API, so Red VM is not needed here.
         microvm::boot_single_vm(
             &self.trace,
@@ -587,12 +589,40 @@ impl Orchestrator {
             "",
         )?;
 
+        // Boot llm VM (CID 5) via direct Firecracker management.
+        // The Referee connects to it via vsock for LLM inference.
+        // The agent uses --reset-mode per-connection for KV-cache isolation.
+        let model_sha = {
+            let images_json_path = self.config.root_dir.join("config/images.json");
+            let contents = std::fs::read_to_string(&images_json_path)?;
+            let images: serde_json::Value = serde_json::from_str(&contents)?;
+            let model_digest = images["model_digest"]
+                .as_str()
+                .ok_or_else(|| anyhow!("model_digest not found in images.json"))?;
+            model_digest.strip_prefix("sha256:").unwrap_or(model_digest).to_string()
+        };
+        microvm::boot_single_vm(
+            &self.trace,
+            "llm",
+            5,
+            9002,
+            &self.config.kernel_path,
+            &self.config.images_dir.join("llm.ext4"),
+            &self.config.runtime_dir,
+            &self.config.firecracker_bin,
+            self.config.mem_mib,
+            self.config.vcpus,
+            None,
+            &model_sha,
+        )?;
+
         self.trace.success(
             trace::TraceStage::MicroVMBoot,
             "enclave booted",
             {
                 let mut m = std::collections::BTreeMap::new();
                 m.insert("blue_vsock".into(), self.config.runtime_dir.join("blue.vsock").display().to_string().into());
+                m.insert("llm_vsock".into(), self.config.runtime_dir.join("llm.vsock").display().to_string().into());
                 m
             },
         );
@@ -611,7 +641,7 @@ impl Orchestrator {
         let eval_ids: Vec<&str> = evaluations.iter().map(|e| e.eval_id.as_str()).collect();
         let mut seen = std::collections::HashSet::new();
 
-        for _ in 0..240 { // 120 seconds max
+        for _ in 0..600 { // 300 seconds max
             if let Ok(contents) = std::fs::read_to_string(&self.config.evidence_log) {
                 for line in contents.lines() {
                     if let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) {

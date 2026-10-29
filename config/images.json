@@ -1,9 +1,9 @@
 {
-  "blue_image_digest": "sha256:2949cb7a389e24e9043e142b9dd952b25f27f829d2d6f8e5783129d64cee611f",
+  "blue_image_digest": "sha256:92ec2a58c1c1a6edfa5cad1fe0827381e8505bec7fdf3e870696bfd77ce929f2",
   "blue_policy_digest": "sha256:d7410617d2e61b54ca5e3934100ca46188918dfff64be6718bef040eab0075f4",
-  "firecracker_version": "Firecracker v1.17.0\n\n2026-10-28T21:41:48.547299389 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0",
+  "firecracker_version": "Firecracker v1.17.0\n\n2026-10-29T00:25:21.266570716 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0",
   "kernel_digest": "sha256:f697969a2f005d296e8c5e2fcd0f6a4f305eb3a06b085d3930d10f1eab3a0883",
-  "llm_image_digest": "sha256:b091386a7c6fb657bda4d663c079ebf9301d048b7203adeaad23f7a335c8b045",
+  "llm_image_digest": "sha256:f9bc67213ede28dc99bbba1d9cd8698bf123fe1127741a9adf744e3ce884b792",
   "model_digest": "sha256:74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
-  "red_image_digest": "sha256:3c5ceff01128c21a178d8df83f2a39205817b8bafeab25f4ab0b47b1289f8e92"
+  "red_image_digest": "sha256:e61d3c640f447d102ff287ba3418b11c964535b60e766985f909a96cc3953221"
 }

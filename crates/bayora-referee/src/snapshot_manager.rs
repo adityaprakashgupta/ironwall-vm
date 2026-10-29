@@ -410,13 +410,12 @@ impl ResetManager for FirecrackerSnapshotManager {
 
         // 3. The reset is not complete until the restored workload answers:
         //    the first turn after it must never race the guest's boot.
-        //    After loading the snapshot into a fresh Firecracker process, the
-        //    vsock device needs a moment to initialise. Give it a short
-        //    grace period, then let the transport layer's retry logic handle
-        //    any remaining transient connection failures.
+        //    Give the guest VM a grace period to boot and bind its vsock
+        //    socket, then let the transport layer's retry logic handle any
+        //    remaining transient connection failures on the first turn.
         if let Some(process) = &self.process {
             if process.readiness_port.is_some() {
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tokio::time::sleep(Duration::from_secs(8)).await;
             }
         }
 

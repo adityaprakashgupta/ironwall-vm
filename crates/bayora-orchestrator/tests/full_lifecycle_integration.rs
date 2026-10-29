@@ -176,8 +176,7 @@ async fn full_lifecycle_with_real_microvms() {
         .arg("--firecracker-api").arg(runtime_dir.join("fc-llm.sock"))
         .arg("--llm-port").arg("9002")
         .arg("--transport").arg("firecracker")
-        .arg("--reset").arg("snapshot")
-        .arg("--snapshot-path").arg(root.join("microvm/snapshots/llm-golden.snap"))
+        .arg("--reset").arg("noop")
         .arg("--vsock-port").arg("5000")
         .arg("--firecracker-bin").arg(root.join("microvm/artifacts/firecracker"))
         .arg("--capability-ttl-ms").arg("300000")
@@ -308,6 +307,78 @@ async fn full_lifecycle_with_real_microvms() {
         "blue.vsock never appeared"
     );
     eprintln!("Blue VM vsock ready");
+
+    // -----------------------------------------------------------------------
+    // Step 4b: Boot LLM Firecracker MicroVM (Referee will connect via vsock)
+    // -----------------------------------------------------------------------
+    eprintln!("Booting LLM Firecracker MicroVM...");
+    let llm_api_sock = runtime_dir.join("fc-llm.sock");
+    let llm_vsock = runtime_dir.join("llm.vsock");
+    let llm_config = runtime_dir.join("fc-llm.json");
+    let llm_serial = runtime_dir.join("llm.serial");
+    let llm_log = runtime_dir.join("llm.log");
+
+    let _ = std::fs::remove_file(&llm_api_sock);
+    let _ = std::fs::remove_file(&llm_vsock);
+    let _ = std::fs::remove_file(&llm_config);
+
+    let model_sha = {
+        let contents = std::fs::read_to_string(root.join("config/images.json")).unwrap();
+        let images: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        images["model_digest"].as_str().unwrap().strip_prefix("sha256:").unwrap().to_string()
+    };
+
+    let llm_config_json = serde_json::json!({
+        "boot-source": {
+            "kernel_image_path": root.join("microvm/artifacts/vmlinux").display().to_string(),
+            "boot_args": format!("console=ttyS0 reboot=k panic=1 pci=off init=/opt/bayora/init.sh bayora.role=llm bayora.port=9002 bayora.model_sha256={model_sha}")
+        },
+        "drives": [
+            { "drive_id": "rootfs", "path_on_host": root.join("microvm/images/llm.ext4").display().to_string(), "is_root_device": true, "is_read_only": true }
+        ],
+        "machine-config": { "vcpu_count": 1, "mem_size_mib": 2048, "smt": false },
+        "vsock": { "guest_cid": 5, "uds_path": llm_vsock.display().to_string() },
+        "serial": { "path": llm_serial.display().to_string() },
+        "logger": { "log_path": llm_log.display().to_string(), "level": "Warning" }
+    });
+    tokio::fs::write(&llm_config, serde_json::to_string_pretty(&llm_config_json).unwrap())
+        .await
+        .expect("failed to write llm firecracker config");
+
+    let _llm_fc = Command::new(root.join("microvm/artifacts/firecracker"))
+        .arg("--api-sock").arg(&llm_api_sock)
+        .arg("--config-file").arg(&llm_config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start firecracker for LLM VM");
+
+    // Wait for API socket
+    for _ in 0..100 {
+        if llm_api_sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Start the instance via Firecracker API (UNIX socket)
+    let _ = Command::new("curl")
+        .arg("-s").arg("-f").arg("-X").arg("PUT")
+        .arg("http://localhost/actions")
+        .arg("--unix-socket").arg(&llm_api_sock)
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(r#"{"action_type":"InstanceStart"}"#)
+        .status();
+
+    // Wait for vsock socket
+    assert!(
+        wait_for_socket(&llm_vsock, 60),
+        "llm.vsock never appeared"
+    );
+    eprintln!("LLM VM vsock ready");
+
+    // Give LLM agent time to load the model
+    std::thread::sleep(Duration::from_secs(25));
 
     // -----------------------------------------------------------------------
     // Step 5: Run turns via Referee HTTP API

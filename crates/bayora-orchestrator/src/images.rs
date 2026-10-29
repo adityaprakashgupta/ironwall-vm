@@ -146,11 +146,18 @@ fn build_role_image(
         fs::create_dir_all(stage_dir.join(dir))?;
     }
 
-    // Copy init.sh
+    // Copy init.sh — must be executable so the kernel can launch it as PID 1.
+    // `fs::copy` does not preserve the source file's mode bits, so set 0o755
+    // explicitly; otherwise the guest panics with EACCES (-13) on `init=...`.
     fs::copy(root.join("microvm/guest/init.sh"), stage_dir.join("opt/bayora/init.sh"))?;
+    std::fs::set_permissions(
+        stage_dir.join("opt/bayora/init.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
 
     if role == "llm" {
-        // Copy Rust agent binary
+        // Copy Rust agent binary — must be executable; `fs::copy` does not
+        // preserve mode bits, so set 0o755 explicitly.
         let agent_bin = root.join("target/release/bayora-llm-agent");
         if !agent_bin.exists() {
             return Err(anyhow!(
@@ -159,6 +166,10 @@ fn build_role_image(
             ));
         }
         fs::copy(&agent_bin, stage_dir.join("opt/bayora/bayora-llm-agent"))?;
+        std::fs::set_permissions(
+            stage_dir.join("opt/bayora/bayora-llm-agent"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
 
         // Copy model weights
         let model_path = model.expect("model path required for llm role");
@@ -299,19 +310,25 @@ fn stage_system_libs(trace: &Trace, agent_bin: &Path, stage_dir: &Path) -> Resul
 }
 
 /// Stage Python interpreter and stdlib into the image (for red/blue roles).
-fn stage_python(_trace: &Trace, stage_dir: &Path) -> Result<()> {
+fn stage_python(trace: &Trace, stage_dir: &Path) -> Result<()> {
     let python_bin = which_which("python3")?;
 
-    fs::create_dir_all(stage_dir.join("usr/lib64/python3"))?;
     fs::create_dir_all(stage_dir.join("usr/bin"))?;
+    fs::create_dir_all(stage_dir.join("lib64"))?;
 
     // Copy the Python binary
     fs::copy(&python_bin, stage_dir.join("usr/bin/python3"))?;
 
-    // Copy the Python standard library. Discover its location via sysconfig so
-    // this works on any host (Debian, RHEL, Alpine, etc.). Without the stdlib,
-    // the red/blue agents cannot import `json`, `socket`, `sys`, etc. and fail
-    // at import time.
+    // Stage the shared libraries python3 depends on (dynamic linker,
+    // libpython3, libc, libm, etc.). Without these, the kernel cannot load
+    // the interpreter and busybox reports "python3: not found".
+    stage_system_libs(trace, &python_bin, stage_dir)?;
+
+    // Copy the Python standard library to the versioned path Python expects
+    // at runtime (e.g. /usr/lib64/python3.14/). Using the host's sysconfig
+    // stdlib dir for the source, but placing it under the versioned
+    // directory name so `import json`, `import socket`, etc. work inside
+    // the guest.
     let stdlib_dir = {
         let output = std::process::Command::new("python3")
             .arg("-c")
@@ -330,9 +347,24 @@ fn stage_python(_trace: &Trace, stage_dir: &Path) -> Result<()> {
         ));
     }
 
+    // Discover the Python version (e.g. "3.14") so we can stage the stdlib
+    // at the path the interpreter will search inside the guest.
+    let py_version = {
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("failed to discover Python version"));
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let stdlib_dest = stage_dir.join(format!("usr/lib64/python{}", py_version));
+    fs::create_dir_all(&stdlib_dest)?;
+
     for entry in std::fs::read_dir(stdlib_path)? {
         let entry = entry?;
-        let dest = stage_dir.join("usr/lib64/python3").join(entry.file_name());
+        let dest = stdlib_dest.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_dir_all(&entry.path(), &dest)?;
         } else {
@@ -395,15 +427,15 @@ fn take_golden_snapshot(
             { "drive_id": "rootfs", "path_on_host": image.display().to_string(), "is_root_device": true, "is_read_only": true }
         ],
         "machine-config": { "vcpu_count": 1, "mem_size_mib": 2048, "smt": false },
-        "vsock": { "guest_cid": 5, "uds_path": vsock_uds.display().to_string() },
-        "logger": { "log_path": work_dir.join("fc.log").display().to_string(), "level": "Warning" }
+        "vsock": { "guest_cid": 5, "uds_path": vsock_uds.display().to_string() }
     });
 
     let config_path = work_dir.join("config.json");
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
-    // Start Firecracker
-    let mut fc = Command::new(firecracker_bin)
+    // Start Firecracker (root for KVM vsock access)
+    let mut fc = Command::new("sudo")
+        .arg(firecracker_bin)
         .arg("--api-sock").arg(&api_sock)
         .arg("--config-file").arg(&config_path)
         .stdout(std::process::Stdio::null())
@@ -418,14 +450,23 @@ fn take_golden_snapshot(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Start the instance via Firecracker API (Unix socket)
+    // Firecracker runs as root; chmod its API socket so curl can connect.
+    let _ = Command::new("sudo")
+        .arg("chmod")
+        .arg("0666")
+        .arg(&api_sock)
+        .status();
+
+    // Start the instance via Firecracker API (Unix socket).
+    // Firecracker auto-starts the VM when --config-file is provided, so
+    // InstanceStart may return 400 ("already started") — that is not an error.
     let _ = Command::new("curl")
         .arg("-s").arg("-f").arg("-X").arg("PUT")
         .arg("http://localhost/actions")
         .arg("--unix-socket").arg(&api_sock)
         .arg("-H").arg("Content-Type: application/json")
         .arg("-d").arg(r#"{"action_type":"InstanceStart"}"#)
-        .status()?;
+        .status();
 
     // Wait for vsock socket
     for _ in 0..100 {
@@ -435,32 +476,29 @@ fn take_golden_snapshot(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Wait for agent to answer CONNECT handshake
-    for _ in 0..600 {
-        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&vsock_uds) {
-            use std::io::Read;
-            let _ = stream.write_all(b"CONNECT 9002\n");
-            let mut buf = [0u8; 32];
-            if let Ok(n) = stream.read(&mut buf) {
-                let ack = String::from_utf8_lossy(&buf[..n]);
-                if ack.starts_with("OK ") {
-                    break;
-                }
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    // Wait for the guest agent to initialize. We deliberately do NOT connect
+    // via vsock here: an active vsock connection at snapshot time leaves the
+    // vsock device in an inconsistent state that breaks restore. Just wait
+    // long enough for the agent to load the model and bind its socket.
+    std::thread::sleep(std::time::Duration::from_secs(15));
+
+    // Remove any stale read-only snapshot files from previous builds
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(mem_path);
 
     // Pause the VM via Firecracker API (Unix socket)
-    let _ = Command::new("curl")
-        .arg("-s").arg("-f").arg("-P").arg("http://localhost/vm")
+    let pause_status = Command::new("curl")
+        .arg("-s").arg("-f").arg("-X").arg("PATCH").arg("http://localhost/vm")
         .arg("--unix-socket").arg(&api_sock)
         .arg("-H").arg("Content-Type: application/json")
         .arg("-d").arg(r#"{"state":"Paused"}"#)
         .status()?;
+    if !pause_status.success() {
+        return Err(anyhow!("failed to pause VM for snapshot"));
+    }
 
     // Create snapshot via Firecracker API (Unix socket)
-    let _ = Command::new("curl")
+    let snap_status = Command::new("curl")
         .arg("-s").arg("-f").arg("-X").arg("PUT")
         .arg("http://localhost/snapshot/create")
         .arg("--unix-socket").arg(&api_sock)
@@ -471,10 +509,21 @@ fn take_golden_snapshot(
             mem_path.display()
         ))
         .status()?;
+    if !snap_status.success() {
+        return Err(anyhow!("failed to create golden snapshot"));
+    }
 
     // Kill Firecracker
     let _ = fc.kill();
     let _ = fc.wait();
+
+    // Verify snapshot files were created
+    if !snapshot_path.exists() {
+        return Err(anyhow!("snapshot file not created at {}", snapshot_path.display()));
+    }
+    if !mem_path.exists() {
+        return Err(anyhow!("mem file not created at {}", mem_path.display()));
+    }
 
     // Set permissions
     std::fs::set_permissions(snapshot_path, std::fs::Permissions::from_mode(0o444))?;

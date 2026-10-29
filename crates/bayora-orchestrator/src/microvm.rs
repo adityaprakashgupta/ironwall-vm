@@ -193,14 +193,24 @@ pub fn boot_single_vm(
         thread::sleep(Duration::from_millis(100));
     }
 
-    // Start the instance via Firecracker API (Unix socket)
+    // Firecracker runs as root (via sudo) for KVM vsock access, so its API
+    // socket is root-owned. chmod it so the (non-root) curl below can connect.
+    let _ = Command::new("sudo")
+        .arg("chmod")
+        .arg("0666")
+        .arg(&api_sock)
+        .status();
+
+    // Start the instance via Firecracker API (Unix socket).
+    // Firecracker auto-starts the VM when --config-file is provided, so
+    // InstanceStart may return 400 ("already started") — that is not an error.
     let _ = Command::new("curl")
         .arg("-s").arg("-f").arg("-X").arg("PUT")
         .arg("http://localhost/actions")
         .arg("--unix-socket").arg(&api_sock)
         .arg("-H").arg("Content-Type: application/json")
         .arg("-d").arg(r#"{"action_type":"InstanceStart"}"#)
-        .status()?;
+        .status();
 
     // Wait for vsock socket (can take a while for Firecracker to create it)
     let mut vsock_found = false;

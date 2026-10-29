@@ -285,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
             blue_port: args.blue_port,
             llm_uds: llm_uds.clone(),
             llm_port: args.llm_port,
-            timeout: std::time::Duration::from_secs(30),
+            timeout: std::time::Duration::from_secs(120),
         }),
         #[cfg(not(unix))]
         "firecracker" => {

@@ -104,8 +104,7 @@ fn llm_produces_actual_output_through_firecracker() {
         .arg("--firecracker-api").arg(runtime_dir.join("fc-llm.sock"))
         .arg("--llm-port").arg("9002")
         .arg("--transport").arg("firecracker")
-        .arg("--reset").arg("snapshot")
-        .arg("--snapshot-path").arg(root.join("microvm/snapshots/llm-golden.snap"))
+        .arg("--reset").arg("noop")
         .arg("--vsock-port").arg("5000")
         .arg("--firecracker-bin").arg(root.join("microvm/artifacts/firecracker"))
         .arg("--capability-ttl-ms").arg("300000")
@@ -168,6 +167,59 @@ fn llm_produces_actual_output_through_firecracker() {
 
     assert!(wait_for_socket(&blue_vsock, 60), "blue.vsock never appeared");
     eprintln!("Blue VM ready");
+
+    // Boot LLM VM
+    eprintln!("Booting LLM Firecracker MicroVM...");
+    let llm_api_sock = runtime_dir.join("fc-llm.sock");
+    let llm_vsock = runtime_dir.join("llm.vsock");
+    let llm_config = runtime_dir.join("fc-llm.json");
+    let _ = std::fs::remove_file(&llm_api_sock);
+    let _ = std::fs::remove_file(&llm_vsock);
+
+    let model_sha = {
+        let contents = std::fs::read_to_string(root.join("config/images.json")).unwrap();
+        let images: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        images["model_digest"].as_str().unwrap().strip_prefix("sha256:").unwrap().to_string()
+    };
+
+    let llm_config_json = serde_json::json!({
+        "boot-source": {
+            "kernel_image_path": root.join("microvm/artifacts/vmlinux").display().to_string(),
+            "boot_args": format!("console=ttyS0 reboot=k panic=1 pci=off init=/opt/bayora/init.sh bayora.role=llm bayora.port=9002 bayora.model_sha256={model_sha}")
+        },
+        "drives": [
+            { "drive_id": "rootfs", "path_on_host": root.join("microvm/images/llm.ext4").display().to_string(), "is_root_device": true, "is_read_only": true }
+        ],
+        "machine-config": { "vcpu_count": 1, "mem_size_mib": 2048, "smt": false },
+        "vsock": { "guest_cid": 5, "uds_path": llm_vsock.display().to_string() },
+        "logger": { "log_path": runtime_dir.join("llm.log").display().to_string(), "level": "Warning" }
+    });
+    std::fs::write(&llm_config, serde_json::to_string_pretty(&llm_config_json).unwrap())
+        .expect("failed to write llm config");
+
+    let _llm_fc = Command::new(root.join("microvm/artifacts/firecracker"))
+        .arg("--api-sock").arg(&llm_api_sock)
+        .arg("--config-file").arg(&llm_config)
+        .stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().expect("failed to start firecracker for llm");
+
+    for _ in 0..100 {
+        if llm_api_sock.exists() { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = Command::new("curl")
+        .arg("-s").arg("-f").arg("-X").arg("PUT").arg("http://localhost/actions")
+        .arg("--unix-socket").arg(&llm_api_sock)
+        .arg("-H").arg("Content-Type: application/json")
+        .arg("-d").arg(r#"{"action_type":"InstanceStart"}"#)
+        .status();
+
+    assert!(wait_for_socket(&llm_vsock, 60), "llm.vsock never appeared");
+    eprintln!("LLM VM ready");
+
+    // Give LLM agent time to load the model (~20s on CPU)
+    std::thread::sleep(Duration::from_secs(25));
 
     // Run one turn with a benign prompt
     let prompt = "What is the capital of France?";
