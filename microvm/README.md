@@ -1,4 +1,4 @@
-# MicroVM enclave
+# MicroVM enclave (deployment layer)
 
 Three Firecracker MicroVMs, one vsock each, no network anywhere. This directory
 is the *deployment* layer: it turns the crate code into an actual enclave.
@@ -14,7 +14,7 @@ component with a socket to the signer. The guests have no network device in
 their Firecracker config at all, so "Isolated" is a property of the topology
 rather than of any policy inside the guest.
 
-## What the scripts do
+## What the deployment scripts do
 
 `build_immutable_images.sh` (offline, run as root, once per image revision)
 
@@ -61,39 +61,33 @@ guest state that could carry one evaluation into the next.
   answers,
 * `root` for both scripts.
 
-## Running it
+## Deployment paths
 
-```bash
-sudo microvm/build_immutable_images.sh \
-    --kernel microvm/artifacts/vmlinux \
-    --model  microvm/artifacts/model.gguf
+**No-KVM host (recommended for development and CI):** the Referee's default
+`--transport stub --reset noop` configuration runs the complete architecture
+without Firecracker, KVM, or virtualization. The guest agents run as ordinary
+processes connected over `VMADDR_CID_LOCAL`; the frame protocol, strict parser,
+capability gate, bounded release, constant-size egress, evidence chain, Merkle
+seal and independent verification are all the production code path — only the
+VM boundary is simulated. This variant runs in WSL or CI.
 
-sudo microvm/boot_enclave.sh --kernel microvm/artifacts/vmlinux
-# in another shell:
-cargo run -p bayora-referee -- \
-    --policy config/policy.yaml --images config/images.json \
-    --signer unix:/run/bayora/signer.sock --transport vsock \
-    --blue-cid 4 --blue-port 9001 --llm-cid 5 --llm-port 9002 \
-    --vsock-port 5000 --evidence-log evidence/evidence_log.ndjson \
-    --reset snapshot
-```
+**KVM host:** `--transport vsock` (native AF_VSOCK) and `--transport
+firecracker` / `--reset snapshot` (Firecracker-mediated guests) are available.
+These paths are Linux-only (`cfg`-gated); on other platforms they fail closed
+with a clear message. Real-MicroVM deployment uses the artifacts in
+`microvm/artifacts/` (kernel, Firecracker binary, GGUF model) and builds
+content-addressed guest images whose digests are pinned into
+`config/images.json` and recorded in every signed manifest.
 
-## On a host without Firecracker
-
-`scripts/demo-vsock.py` runs the same guest agents as ordinary processes on one
-Linux kernel, connected over `VMADDR_CID_LOCAL` (CID 1) instead of to real
-MicroVMs. The frame protocol, strict parser, capability gate, bounded release,
-constant-size egress, evidence chain, Merkle seal and independent verification
-are all the production code path; only the VM boundary is simulated. That is
-the variant you can run in WSL or CI.
-
-`scripts/demo.ps1` (Windows) does the same with the Referee's deterministic
-stub transport, so no Linux is needed at all.
+The `microvm/` directory contains privileged shell scripts for image build,
+golden-snapshot creation, and enclave boot. They are documented here for
+completeness; review `build_immutable_images.sh`, `boot_enclave.sh`, and
+`guest/init.sh` before use on a KVM host.
 
 ## Status
 
-`scripts/demo-vsock.py` is exercised in CI/WSL on every change and asserts the
-four pillars from Red's own transcript and from the evidence log. The two
-scripts in this directory are deployment artefacts that need a KVM host; they
-are written to fail loudly rather than to limp along without the prerequisites
-they check for.
+The no-KVM demo path is exercised in CI/WSL on every change and asserts the
+four pillars (Isolated, Mediated, Resettable, Verifiable) from Red's own
+transcript and from the evidence log. The scripts in this directory are
+deployment artefacts that need a KVM host; they are written to fail loudly
+rather than to limp along without the prerequisites they check for.

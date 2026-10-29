@@ -1,7 +1,7 @@
-# Bayora Enclave v3.0 — Implementation Audit Report
+# IronWall VM v3.0 — Implementation Audit Report
 
 **Repository:** `/home/adityaprakashgupta/ironwall-vm`
-**Reference:** System Design Document "Bayora Enclave — Production Security Architecture (v3.0)"
+**Reference:** System Design Document "IronWall VM — Production Security Architecture (v3.0)"
 **Audit scope:** Full source scan (Rust workspace + Python guests + shell scripts), build verification, unit-test execution, design-vs-implementation diff.
 **Dates:** Build + tests run Tue Oct 27 2026.
 
@@ -255,7 +255,7 @@ This confirms all four pillars work end-to-end:
 - **Resettable**: LLM VM restored from golden snapshot between turns
 - **Verifiable**: Independent Verifier confirms hash chain, Merkle root, and signatures all valid
 
-The Bayora Enclave v3.0 implementation is **cryptographically sound where it matters most**: the Referee TCB, the trust-anchor signing boundary, the bounded-observable timing guard, the single-use capability system, the JCS/hash-chain/Merkle evidence plane, and the independent verifier are all implemented as specified and covered by a strong test suite (**159 passing tests** — 158 unit + 1 end-to-end integration test with real Firecracker MicroVMs, plus adversarial tampering tests).
+The IronWall VM v3.0 implementation is **cryptographically sound where it matters most**: the Referee TCB, the trust-anchor signing boundary, the bounded-observable timing guard, the single-use capability system, the JCS/hash-chain/Merkle evidence plane, and the independent verifier are all implemented as specified and covered by a strong test suite (**159 passing tests** — 158 unit + 1 end-to-end integration test with real Firecracker MicroVMs, plus adversarial tampering tests).
 
 - **Phase 1**: Fixed `LlmEngineResetManager` reporting `Snapshot` instead of `LogicalKv`; fixed orchestrator lifecycle ordering so evaluations are created before VM boot and `wait_for_completion()` is called
 - **Phase 2**: Added `cargo build --release` step before shelling out to binaries; aligned `--strict-timing --require-all-sealed` across `full` and `evaluate` subcommands

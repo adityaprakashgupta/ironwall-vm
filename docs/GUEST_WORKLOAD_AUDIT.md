@@ -1,4 +1,4 @@
-# Guest Workload Audit — Bayora Enclave v3.0
+# Guest Workload Audit — IronWall VM v3.0
 
 This document audits the three guest MicroVM workloads (red, blue, llm) against
 the v3.0 design doc. Each guest runs inside its own Firecracker MicroVM with no
@@ -257,8 +257,8 @@ It is reset between evaluations by the Referee (snapshot restore).
 | Model digest from kernel cmdline (llm only) | `bayora.model_sha256=` parsed and verified | ✅ |
 | Red: mounts provisioning disk read-only | `mount -t ext4 -o ro /dev/vdb /run/bayora` | ✅ |
 | Red: deletes task disk after use | Not implemented — but the disk is read-only and ephemeral (tmpfs-backed? No, it's a virtio-blk backed by the host ext4 image) | ⚠️ See below |
-| Red: execs agent.py | `exec python3 /opt/bayora/red-team/agent.py` | ✅ |
-| Blue: execs agent.py with port | `exec python3 /opt/bayora/blue-team/agent.py 9001` | ✅ |
+| Red: execs agent.py | execs the red Python agent | ✅ |
+| Blue: execs agent.py with port | execs the blue Python agent on port 9001 | ✅ |
 | LLM: verifies model digest before binding | `sha256sum -c` before exec | ✅ |
 | LLM: fail-closed loops if digest missing/mismatch | `while :; do sleep 3600; done` | ✅ |
 | Unknown role: debug shell | `exec sh` | ✅ |

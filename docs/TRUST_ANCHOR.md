@@ -1,6 +1,6 @@
 # The Trust Anchor boundary
 
-The Trust Anchor is the **only** party in the Bayora Enclave that holds private
+The Trust Anchor is the **only** party in the IronWall VM that holds private
 key material. Everything else — the Referee, the control plane, the workloads,
 the verifier — holds at most a *public* key. This document defines the
 boundary and how the reference implementation enforces it.
