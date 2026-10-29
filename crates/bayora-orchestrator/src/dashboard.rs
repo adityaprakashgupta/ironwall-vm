@@ -79,6 +79,7 @@ struct EvalRow {
     prompt: String,
     path: String,   // "llm", "regex_block", "semantic_block"
     held_us: Option<u64>,
+    leaf_hash: String,   // manifest_hash leaf for Merkle tree
 }
 
 /// Read trace + evidence logs into DashboardState.
@@ -170,11 +171,19 @@ fn load_state(trace_log: &Path, evidence_log: &Path) -> DashboardState {
 
             let prompt = state.prompts.get(&eval_id).cloned().unwrap_or_default();
 
+            // Extract manifest_hash as the Merkle leaf hash for this evaluation.
+            let leaf_hash = manifest
+                .and_then(|m| m.get("manifest_hash"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
             state.evaluations.push(EvalRow {
                 eval_id_short: eval_id.get(14..18).unwrap_or(&eval_id).to_string(),
                 prompt,
                 path,
                 held_us,
+                leaf_hash,
             });
         }
         state.sealed_count = state.evaluations.len();
@@ -260,11 +269,26 @@ fn merkle_lines(state: &DashboardState) -> Vec<Line> {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("  leaf hashes (SHA-256 per evaluation)"));
-    lines.push(Line::from("        │      │      │      │"));
-    lines.push(Line::from("      ┌──┴──┐ ┌──┴──┐ ┌──┴──┐"));
-    lines.push(Line::from("     │       │ │       │ │       │"));
-    lines.push(Line::from("   ev_01  ev_02  ev_03 …  ev_N"));
+    lines.push(Line::from("  Leaf hashes (SHA-256 per evaluation manifest)"));
+    lines.push(Line::from(""));
+
+    if state.evaluations.is_empty() {
+        lines.push(Line::from("    (no evaluations yet)"));
+    } else {
+        for eval in &state.evaluations {
+            let short_hash = if eval.leaf_hash.len() > 16 {
+                format!("{}…{}", &eval.leaf_hash[..8], &eval.leaf_hash[eval.leaf_hash.len()-8..])
+            } else {
+                eval.leaf_hash.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(eval.eval_id_short.as_str(), Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+                Span::styled("  ", Style::default()),
+                Span::styled(short_hash, Style::default().fg(Color::Cyan)),
+            ]));
+        }
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(format!("Evaluations sealed: {}", state.sealed_count)));
     lines
